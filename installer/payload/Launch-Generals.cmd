@@ -1,2 +1,2 @@
-@echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Launch-Fluid.ps1" -Game Generals %*
+@echo off
+start "" "%~dp0FluidLauncher.exe" %*

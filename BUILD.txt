@@ -12,3 +12,6 @@ Player ZIPs: download the Microsoft-signed x86 runtime from
 https://aka.ms/vc14/vc_redist.x86.exe, then run:
 python tools/package_release.py --build build --runtime vc_redist.x86.exe
 Extracted release source uses GeneralsGameCode/; rename it engine/ for these commands.
+
+The packaging script compiles the graphical wrappers with the Windows .NET
+Framework C# compiler. No game engine rebuild is needed for installer-only edits.

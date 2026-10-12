@@ -1,7 +1,6 @@
-v1.0.0: normal-speed 120 Hz simulation with automatic display-rate rendering
-up to 240 FPS. Adds borderless/windowed play, farther zoom, faster camera
-controls, minimap dragging, multiple instances and timing fixes. Counters hidden
-by default. Separate Generals and Zero Hour installers; owned games required.
-
-Source and licenses included. Heavy battles may lag; other mods and multiplayer
-are not certified. Independent community modification; no EA endorsement.
+v1.0.1 adds graphical permanent installation and hidden game launchers.
+Choose any writable drive/folder. Detects installed Fluid builds, upgrades or
+repairs while preserving saves/settings, and backs them up before Reset.
+Includes Uninstall (keep saves by default) and a standalone uninstaller.
+Migrates recognized v1.0.0 Fluid saves/settings. Downloaded setup files can be
+deleted afterward. Original games stay intact; engine binaries unchanged.
