@@ -83,7 +83,7 @@ sealed class SetupForm:Form {
  readonly Label installed=new Label();readonly TextBox status=new TextBox();readonly Button update=new Button(),repair=new Button(),reset=new Button(),uninstall=new Button();readonly CheckBox keepSaves=new CheckBox();
  readonly ProgressBar progress=new ProgressBar();Dictionary<string,object> found=new Dictionary<string,object>();bool busy,maintenance;string edition="Both";
  internal SetupForm(){
-  Text="Fluid Setup 1.0.1";ClientSize=new Size(720,510);Font=new Font("Segoe UI",9);AutoScaleMode=AutoScaleMode.Font;FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;StartPosition=FormStartPosition.CenterScreen;
+  Text="Fluid Setup 1.0.2";ClientSize=new Size(720,510);Font=new Font("Segoe UI",9);AutoScaleMode=AutoScaleMode.Font;FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;StartPosition=FormStartPosition.CenterScreen;
   string config=Path.Combine(Bootstrap.Root,"setup-config.json");if(!File.Exists(config))config=Path.Combine(Bootstrap.Root,"maintenance-config.json");if(File.Exists(config)){Dictionary<string,object> settings=Bootstrap.Map(Bootstrap.Json.DeserializeObject(File.ReadAllText(config)));edition=Bootstrap.Value(settings,"game");maintenance=settings.ContainsKey("maintenance") && Convert.ToBoolean(settings["maintenance"]);}
   AddLabel("Fluid Generals / Fluid Generals Zero Hour",16,12,650,24).Font=new Font(Font,FontStyle.Bold);
   AddLabel(maintenance?"Uninstall selected Fluid games. Original games remain unchanged.":"Install permanently. Downloaded setup files can be deleted afterward.",16,40,680,22);

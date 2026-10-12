@@ -1,6 +1,6 @@
 Command & Conquer: Fluid Generals
 Command & Conquer: Fluid Generals Zero Hour
-v1.0.1 - independent community modification
+v1.0.2 - independent community modification
 
 Normal-speed 120 Hz simulation, independent of monitor refresh rate.
 Rendering follows your display, up to 240 FPS.

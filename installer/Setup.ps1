@@ -12,17 +12,72 @@ $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 $package=[IO.Path]::GetFullPath($PSScriptRoot)
 $payload=Join-Path $package 'payload'
-$version='1.0.1'
+$version='1.0.2'
 if(-not $RegistryPath){$RegistryPath=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Fluid\installations.json'}
-function Full([string]$p){$full=[IO.Path]::GetFullPath($p);if($full -eq [IO.Path]::GetPathRoot($full)){return $full};return $full.TrimEnd('\')}
+# Resolve redirected Windows folders before comparing install/game boundaries.
+if(-not('FluidPaths' -as [type])){
+ Add-Type @'
+using System;
+using System.Text;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class FluidPaths {
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern uint GetFinalPathNameByHandle(SafeFileHandle file,StringBuilder name,uint length,uint flags);
+ public static string Resolve(string path) {
+  using(var file=CreateFile(path,0,7,IntPtr.Zero,3,0x02000000,IntPtr.Zero)) {
+   if(file.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error(),"Cannot access folder: "+path);
+   var name=new StringBuilder(32768);uint length=GetFinalPathNameByHandle(file,name,(uint)name.Capacity,0);
+   if(length==0 || length>=name.Capacity)throw new Win32Exception(Marshal.GetLastWin32Error(),"Cannot resolve folder: "+path);
+   string result=name.ToString();
+   if(result.StartsWith(@"\\?\UNC\"))return @"\\"+result.Substring(8);
+   return result.StartsWith(@"\\?\")?result.Substring(4):result;
+  }
+ }
+}
+'@
+}
+function Raw-Full([string]$p){$full=[IO.Path]::GetFullPath($p);if($full -eq [IO.Path]::GetPathRoot($full)){return $full};return $full.TrimEnd('\')}
+function Full([string]$p){
+ $current=Raw-Full $p;$tail=[Collections.Generic.List[string]]::new()
+ while(-not(Test-Path -LiteralPath $current)){
+  $parent=Split-Path $current -Parent;if(-not $parent -or $parent -eq $current){throw "Folder is not accessible: $p"}
+  $tail.Insert(0,(Split-Path $current -Leaf));$current=$parent
+ }
+ $resolved=[FluidPaths]::Resolve($current)
+ foreach($part in $tail){$resolved=Join-Path $resolved $part}
+ return Raw-Full $resolved
+}
 function Within([string]$p,[string]$parent){$p=Full $p;$parent=Full $parent;return $p.Equals($parent,[StringComparison]::OrdinalIgnoreCase) -or $p.StartsWith($parent.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)}
 function Assert-Plain([string]$p){
  $current=Full $p
  while($current){
-  if(Test-Path -LiteralPath $current){$i=Get-Item -LiteralPath $current -Force;if(-not $i.PSIsContainer -or ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw "Use an ordinary folder: $current"}}
+  if(Test-Path -LiteralPath $current){$i=Get-Item -LiteralPath $current -Force;if(-not $i.PSIsContainer -or ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw "Folder is not accessible: $current"}}
   $parent=Split-Path $current -Parent;if(-not $parent -or $parent -eq $current){break};$current=$parent
  }
 }
+function Assert-Owned([string]$p,[string]$root){
+ $current=Raw-Full $p;$root=Full $root
+ if(-not(Within $current $root)){throw "Redirected path leaves the Fluid installation: $p"}
+ # Ancestor redirects are supported; redirects inside managed folders are not.
+ while($current -ne $root){
+  if(Test-Path -LiteralPath $current){if((Get-Item -LiteralPath $current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw "Redirected file/folder inside Fluid: $current"}}
+  $parent=Split-Path $current -Parent;if(-not $parent -or $parent -eq $current){throw 'Invalid Fluid path.'};$current=$parent
+ }
+}
+function Assert-Tree([string]$p,[string]$root){
+ Assert-Owned $p $root
+ if(-not(Test-Path -LiteralPath $p)){return}
+ $pending=[Collections.Generic.Stack[string]]::new();$pending.Push($p)
+ while($pending.Count){
+  $current=$pending.Pop();$entry=Get-Item -LiteralPath $current -Force
+  if($entry.Attributes -band [IO.FileAttributes]::ReparsePoint){throw "Redirected file/folder inside Fluid: $current"}
+  if($entry.PSIsContainer){foreach($child in Get-ChildItem -LiteralPath $current -Force){$pending.Push($child.FullName)}}
+ }
+}
+$package=Full $package;$payload=Join-Path $package 'payload'
+trap { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
 function Read-FluidState([string]$root,[string]$which){
  if(-not $root){return $null}
  try{
@@ -96,10 +151,10 @@ if($Action -eq 'Uninstall'){
   if($Game -ne 'Both' -and $Game -ne $which){continue}
   $root=Join-Path $InstallBase $which
   if(-not(Test-Path -LiteralPath $root)){continue}
-  Assert-Plain $root;$state=Read-FluidState $root $which
+  Assert-Tree $root $InstallBase;$state=Read-FluidState $root $which
   if(-not $state -or (Within $root $state.original_root) -or (Within $state.original_root $root)){throw 'Uninstall only removes a recognized Fluid folder outside the original game.'}
   $exe=Join-Path $root "bin\$which\$($state.exe)"
-  if(@($running|Where-Object {$_.ExecutablePath -and $_.ExecutablePath.Equals($exe,[StringComparison]::OrdinalIgnoreCase)}).Count){throw "Close Fluid $which before uninstalling."}
+  if(@($running|Where-Object {$_.ExecutablePath -and (Full $_.ExecutablePath).Equals((Full $exe),[StringComparison]::OrdinalIgnoreCase)}).Count){throw "Close Fluid $which before uninstalling."}
   $items=@('assets','bin','FluidLauncher.exe','Launch-Fluid.ps1','Ensure-OwnedMilesAudio.ps1','Ensure-AdaptiveCameraInput.ps1',"Launch-$which.cmd")
   if($RemoveSaves){$items+=@('profiles','backups',"simulation-$which.ini")}
   $targets=@()
@@ -144,13 +199,13 @@ foreach($s in $specs){
  $s.Root=if($s.Given){Full $s.Given}else{Find-Game $s.Game};if(-not $s.Root){throw "Select your installed $($s.Game) game folder."};Assert-Plain $s.Root
  foreach($f in @($s.Required,'BINKW32.DLL','mss32.dll','MSS\msssoft.m3d','MSS\mssmp3.asi','MSS\mssvoice.asi','MSS\mssdsp.flt')){if(-not(Test-Path -LiteralPath (Join-Path $s.Root $f))){throw "$($s.Game) is missing $f. Verify the original game or select its correct folder."}}
  if(-not(Test-Path -LiteralPath (Join-Path $payload "bin\$($s.Game)\$($s.Exe)"))){throw 'This package does not contain the selected game engine.'}
- $s.Destination=Join-Path $InstallBase $s.Game;Assert-Plain $s.Destination
+ $s.Destination=Join-Path $InstallBase $s.Game;Assert-Tree $s.Destination $InstallBase
  if((Within $s.Destination $s.Root) -or (Within $s.Root $s.Destination)){throw 'Install Fluid outside the original game folder.'}
  $s.Exists=Test-Path -LiteralPath $s.Destination
  if($s.Exists -and -not (Read-FluidState $s.Destination $s.Game)){throw "Not a recognized Fluid installation: $($s.Destination). Choose another location."}
  if($s.Migrate){$s.Migrate=Full $s.Migrate;Assert-Plain $s.Migrate;if(-not(Read-FluidState $s.Migrate $s.Game)){throw 'The previous folder is not a recognized Fluid installation.'}}
  foreach($root in @($s.Destination,$s.Migrate)){
-  if($root){$exe=Join-Path $root "bin\$($s.Game)\$($s.Exe)";if(@($running|Where-Object {$_.ExecutablePath -and $_.ExecutablePath.Equals($exe,[StringComparison]::OrdinalIgnoreCase)}).Count){throw "Close Fluid $($s.Game) before updating or migrating it."}}
+  if($root){$exe=Join-Path $root "bin\$($s.Game)\$($s.Exe)";if(@($running|Where-Object {$_.ExecutablePath -and (Full $_.ExecutablePath).Equals((Full $exe),[StringComparison]::OrdinalIgnoreCase)}).Count){throw "Close Fluid $($s.Game) before updating or migrating it."}}
  }
 }
 if(-not $SkipPrerequisite){
@@ -176,7 +231,7 @@ public static class FluidFiles {
 '@
 }
 function Put-File([string]$source,[string]$target,[bool]$link=$false){
- Assert-Plain (Split-Path $target -Parent)
+ Assert-Owned $target $InstallBase;Assert-Plain (Split-Path $target -Parent)
  if(Test-Path -LiteralPath $target){$i=Get-Item -LiteralPath $target -Force;if($i.PSIsContainer -or ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw "Redirected target rejected: $target"}}
  New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force|Out-Null
  $temporary=$target+'.fluid-'+[Guid]::NewGuid().ToString('N')
@@ -192,6 +247,7 @@ function Copy-Tree([string]$source,[string]$target,[bool]$onlyMissing=$false){
   if(-not $onlyMissing -or -not(Test-Path -LiteralPath $destination)){Put-File $file.FullName $destination}
  }
 }
+foreach($name in @('Source','licenses','FluidUninstall.exe','Setup.ps1','maintenance-config.json')){Assert-Tree (Join-Path $InstallBase $name) $InstallBase}
 New-Item -ItemType Directory -Path $InstallBase -Force|Out-Null
 $sourceArchive=Join-Path $InstallBase "Source\EngineSource-v$version.zip";Put-File (Join-Path $payload 'EngineSource.zip') $sourceArchive
 Copy-Tree (Join-Path $payload 'licenses') (Join-Path $InstallBase 'licenses')
@@ -221,7 +277,7 @@ foreach($s in $specs){
   $backup=Join-Path $root ('backups\'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[Guid]::NewGuid().ToString('N').Substring(0,6))
   foreach($name in @('profiles',"simulation-$($s.Game).ini")){
    $from=Join-Path $root $name;$to=Join-Path $backup $name
-   if(Test-Path -LiteralPath $from){if(-not(Within $from $root) -or -not(Within $to $root)){throw 'Invalid reset path.'};if($name -eq 'profiles'){Assert-Plain $from};New-Item -ItemType Directory -Path $backup -Force|Out-Null;Move-Item -LiteralPath $from -Destination $to}
+   if(Test-Path -LiteralPath $from){if(-not(Within $from $root) -or -not(Within $to $root)){throw 'Invalid reset path.'};Assert-Tree $from $root;Assert-Owned $to $root;New-Item -ItemType Directory -Path $backup -Force|Out-Null;Move-Item -LiteralPath $from -Destination $to}
   }
   Write-Output 'Settings reset; previous saves/settings are in backups.'
  }elseif($s.Migrate -and $s.Migrate -ne $root){

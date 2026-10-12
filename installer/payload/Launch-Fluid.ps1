@@ -74,7 +74,7 @@ $selection = [pscustomobject]@{
     game = $Game; monitor_hz = $monitorHz; render_fps = $RenderFPS; simulation_hz = $SimulationHz
     engine = $engine; profile = $profile; display_mode = $DisplayMode; width = $Width; height = $Height
     default_simulation_hz = 120; simulation_tier = $(if ($SimulationHz -eq 120) {'Default'} elseif ($SimulationHz -eq 30) {'Original'} else {'Experimental'})
-    status = 'Fluid v1.0.1'; diagnostics = [bool]$Diagnostics
+    status = 'Fluid v1.0.2'; diagnostics = [bool]$Diagnostics
 }
 if ($Inspect) { $selection | ConvertTo-Json; return }
 if (-not (Test-Path -LiteralPath $engine)) { throw "Engine missing; extract the complete ZIP again: $engine" }
