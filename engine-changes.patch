@@ -1,0 +1,1237 @@
+diff --git a/Core/GameEngine/Include/GameClient/ClientInstance.h b/Core/GameEngine/Include/GameClient/ClientInstance.h
+index ce1e18d..c53d988 100644
+--- a/Core/GameEngine/Include/GameClient/ClientInstance.h
++++ b/Core/GameEngine/Include/GameClient/ClientInstance.h
+@@ -16,6 +16,8 @@
+ **	along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+ 
++#pragma once
++
+ namespace rts
+ {
+ 
+diff --git a/Core/GameEngine/Include/GameClient/LookAtXlat.h b/Core/GameEngine/Include/GameClient/LookAtXlat.h
+index e799c32..e3589ba 100644
+--- a/Core/GameEngine/Include/GameClient/LookAtXlat.h
++++ b/Core/GameEngine/Include/GameClient/LookAtXlat.h
+@@ -55,6 +55,7 @@ public:
+ 	void setScreenEdgeScrollMode(ScreenEdgeScrollMode mode);
+ 
+ 	void resetModes(); //Used when disabling input, so when we reenable it we aren't stuck in a mode.
++	Bool verifyCameraSpeed(); // Opt-in bounded diagnostic; never used by normal input.
+ 
+ private:
+ 	enum
+diff --git a/Core/GameEngine/Include/GameClient/View.h b/Core/GameEngine/Include/GameClient/View.h
+index 22ddec7..a4e6fff 100644
+--- a/Core/GameEngine/Include/GameClient/View.h
++++ b/Core/GameEngine/Include/GameClient/View.h
+@@ -232,6 +232,7 @@ public:
+ 	void lockUserControlUntilFrame(UnsignedInt frame) { m_userControlLockedUntilFrame = frame; } ///< Locks the user control over camera until the given frame is reached.
+ 
+ 	virtual void setUserControlled(Bool value) { m_isUserControlled = value; }
++	Bool isUserControlled() const { return m_isUserControlled; }
+ 	Bool isUserControlLocked() const;
+ 
+ 	// for debugging
+diff --git a/Core/GameEngine/Source/Common/CommandLine.cpp b/Core/GameEngine/Source/Common/CommandLine.cpp
+index ed8e6e3..9291308 100644
+--- a/Core/GameEngine/Source/Common/CommandLine.cpp
++++ b/Core/GameEngine/Source/Common/CommandLine.cpp
+@@ -27,6 +27,7 @@
+ 
+ #include "Common/ArchiveFileSystem.h"
+ #include "Common/CommandLine.h"
++#include "Common/FramePacer.h"
+ #include "Common/CRCDebug.h"
+ #include "Common/LocalFileSystem.h"
+ #include "Common/version.h"
+@@ -408,6 +409,18 @@ Int parseMapName(char *args[], int num)
+ 	return 1;
+ }
+ 
++// C&C 240: rendering is configured independently of the legacy simulation FPS.
++Int parseRenderFPSLimit(char *args[], int num)
++{
++	if (num < 2)
++		return 1;
++	char *end = nullptr;
++	const long fps = strtol(args[1], &end, 10);
++	if (end != args[1] && *end == '\0' && fps >= 30 && fps <= 240 && TheFramePacer)
++		TheFramePacer->setFramesPerSecondLimit(static_cast<Int>(fps));
++	return 2;
++}
++
+ Int parseHeadless(char *args[], int num)
+ {
+ 	TheWritableGlobalData->m_headless = TRUE;
+@@ -1193,6 +1206,7 @@ static CommandLineParam paramsForStartup[] =
+ static CommandLineParam paramsForEngineInit[] =
+ {
+ 	{ "-nologo", parseNoLogo }, // TheSuperHackers @tweak Is now available in Release builds.
++	{ "-renderfps", parseRenderFPSLimit },
+ 	{ "-noshellmap", parseNoShellMap },
+ 	{ "-noShellAnim", parseNoWindowAnimation }, // TheSuperHackers @tweak Is now available in Release builds.
+ 	{ "-xres", parseXRes },
+diff --git a/Core/GameEngine/Source/Common/FramePacer.cpp b/Core/GameEngine/Source/Common/FramePacer.cpp
+index 992cd45..37110be 100644
+--- a/Core/GameEngine/Source/Common/FramePacer.cpp
++++ b/Core/GameEngine/Source/Common/FramePacer.cpp
+@@ -18,6 +18,7 @@
+ #include "PreRTS.h"
+ 
+ #include "Common/FramePacer.h"
++#include "Common/Cnc240Config.h"
+ 
+ #include "GameClient/View.h"
+ 
+@@ -35,12 +36,12 @@ FramePacer::FramePacer()
+ 	// Set the time slice size to 1 ms.
+ 	timeBeginPeriod(1);
+ 
+-	m_maxFPS = BaseFps;
++	m_maxFPS = cnc240::DefaultRenderFps;
+ 	m_logicTimeScaleFPS = LOGICFRAMES_PER_SECOND;
+-	m_updateTime = 1.0f / (Real)BaseFps; // initialized to something to avoid division by zero on first use
++	m_updateTime = 1.0f / (Real)cnc240::DefaultRenderFps;
+ 	m_logicFramePhase = 1.0f;
+ 	m_enableFpsLimit = FALSE;
+-	m_enableLogicTimeScale = FALSE;
++	m_enableLogicTimeScale = TRUE;
+ 	m_isTimeFrozen = FALSE;
+ 	m_isGameHalted = FALSE;
+ }
+@@ -85,7 +86,7 @@ void FramePacer::reset()
+ void FramePacer::setFramesPerSecondLimit( Int fps )
+ {
+ 	DEBUG_LOG(("FramePacer::setFramesPerSecondLimit() - setting max fps to %d (TheGlobalData->m_useFpsLimit == %d)", fps, TheGlobalData->m_useFpsLimit));
+-	m_maxFPS = fps;
++	m_maxFPS = cnc240::clampRenderFps(fps);
+ }
+ 
+ Int FramePacer::getFramesPerSecondLimit()  const
+@@ -129,7 +130,8 @@ Bool FramePacer::isActualFramesPerSecondLimitEnabled() const
+ 
+ Int FramePacer::getActualFramesPerSecondLimit() const
+ {
+-	return isActualFramesPerSecondLimitEnabled() ? getFramesPerSecondLimit() : RenderFpsPreset::UncappedFpsValue;
++	// Keep the selected rendering cap even when retail options request uncapped rendering.
++	return getFramesPerSecondLimit();
+ }
+ 
+ Real FramePacer::getUpdateTime()  const
+diff --git a/Core/GameEngine/Source/Common/FrameRateLimit.cpp b/Core/GameEngine/Source/Common/FrameRateLimit.cpp
+index 940b44f..dcc32ff 100644
+--- a/Core/GameEngine/Source/Common/FrameRateLimit.cpp
++++ b/Core/GameEngine/Source/Common/FrameRateLimit.cpp
+@@ -67,7 +67,7 @@ void FrameRateLimit::reset()
+ 
+ 
+ const UnsignedInt RenderFpsPreset::s_fpsValues[] = {
+-	30, 50, 56, 60, 65, 70, 72, 75, 80, 85, 90, 100, 110, 120, 144, 240, 480, UncappedFpsValue };
++	30, 50, 56, 60, 65, 70, 72, 75, 80, 85, 90, 100, 110, 120, 144, 165, 180, 200, 240 };
+ 
+ static_assert(LOGICFRAMES_PER_SECOND <= 30, "Min FPS values need to be revisited!");
+ 
+diff --git a/Core/GameEngine/Source/GameClient/ClientInstance.cpp b/Core/GameEngine/Source/GameClient/ClientInstance.cpp
+index 7b06108..d6cd5fb 100644
+--- a/Core/GameEngine/Source/GameClient/ClientInstance.cpp
++++ b/Core/GameEngine/Source/GameClient/ClientInstance.cpp
+@@ -28,7 +28,7 @@ UnsignedInt ClientInstance::s_instanceIndex = 0;
+ #if defined(RTS_MULTI_INSTANCE)
+ Bool ClientInstance::s_isMultiInstance = true;
+ #else
+-Bool ClientInstance::s_isMultiInstance = false;
++Bool ClientInstance::s_isMultiInstance = true;
+ #endif
+ 
+ bool ClientInstance::initialize()
+@@ -127,7 +127,13 @@ UnsignedInt ClientInstance::getInstanceId()
+ 
+ const char* ClientInstance::getFirstInstanceName()
+ {
+-	return GENERALS_GUID;
++	static const std::string name = []() {
++        char path[MAX_PATH] = {};
++        GetModuleFileNameA(nullptr, path, MAX_PATH);
++        const char *leaf = strrchr(path, '\\');
++        return std::string("Cnc240-Preview-") + (leaf ? leaf + 1 : path);
++    }();
++    return name.c_str();
+ }
+ 
+ } // namespace rts
+diff --git a/Core/GameEngine/Source/GameClient/GUI/GUICallbacks/ControlBarCallback.cpp b/Core/GameEngine/Source/GameClient/GUI/GUICallbacks/ControlBarCallback.cpp
+index 59a83b2..601f4eb 100644
+--- a/Core/GameEngine/Source/GameClient/GUI/GUICallbacks/ControlBarCallback.cpp
++++ b/Core/GameEngine/Source/GameClient/GUI/GUICallbacks/ControlBarCallback.cpp
+@@ -32,6 +32,7 @@
+ #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
+ 
+ #include "Common/GameUtility.h"
++#include "Common/Cnc240RenderStats.h"
+ #include "Common/NameKeyGenerator.h"
+ #include "Common/Player.h"
+ #include "Common/PlayerList.h"
+@@ -53,6 +54,7 @@
+ #include "GameClient/CommandXlat.h"
+ 
+ #include "GameLogic/GameLogic.h"
++#include "GameLogic/Object.h"
+ #include "GameLogic/ScriptEngine.h"
+ 
+ //external declarations of the Gadgets the callbacks can use
+@@ -62,7 +64,7 @@ WindowLayout *popupCommunicatorLayout = nullptr;
+ //-------------------------------------------------------------------------------------------------
+ /** Input procedure for the left HUD */
+ //-------------------------------------------------------------------------------------------------
+-WindowMsgHandledType LeftHUDInput( GameWindow *window, UnsignedInt msg,
++static WindowMsgHandledType LeftHUDClick( GameWindow *window, UnsignedInt msg,
+ 																	 WindowMsgData mData1, WindowMsgData mData2 )
+ {
+ 	//
+@@ -330,6 +332,81 @@ WindowMsgHandledType LeftHUDInput( GameWindow *window, UnsignedInt msg,
+ 
+ }
+ 
++// Left drag is camera navigation; an ordinary left click retains its unit-order meaning.
++// Capture ensures releasing outside the minimap ends the gesture reliably.
++WindowMsgHandledType LeftHUDInput(GameWindow *window, UnsignedInt msg,
++                                 WindowMsgData mData1, WindowMsgData mData2)
++{
++    struct Gesture
++    {
++        GameWindow *window = nullptr;
++        WindowMsgData start = 0;
++        Bool dragging = FALSE;
++        Bool pendingOrder = FALSE;
++    };
++    static Gesture gesture;
++    if (gesture.window && TheWindowManager->winGetCapture() != gesture.window)
++        gesture = Gesture{};
++    if (!rts::localPlayerHasRadar() || TheMouse->getMouseStatus()->middleState == MBS_Down)
++    {
++        if (gesture.window) TheWindowManager->winRelease(gesture.window);
++        gesture = Gesture{};
++        return LeftHUDClick(window, msg, mData1, mData2);
++    }
++    if (msg == GWM_LEFT_UP && gesture.window == window)
++    {
++        const Gesture finished = gesture;
++        TheWindowManager->winRelease(window);
++        gesture = Gesture{};
++        if (finished.pendingOrder && !finished.dragging)
++            return LeftHUDClick(window, GWM_LEFT_DOWN, finished.start, mData2);
++        return MSG_HANDLED;
++    }
++    if (msg == GWM_LEFT_DRAG && gesture.window == window)
++    {
++        const Int x = static_cast<Short>(mData1 & 0xFFFF);
++        const Int y = static_cast<Short>(mData1 >> 16);
++        if (abs(x - static_cast<Short>(gesture.start & 0xFFFF)) >= 3 ||
++            abs(y - static_cast<Short>(gesture.start >> 16)) >= 3)
++            gesture.dragging = TRUE;
++        if (gesture.dragging)
++        {
++            ICoord2D screen, pixel, radar;
++            Coord3D world;
++            window->winGetScreenPosition(&screen.x, &screen.y);
++            pixel.x = x - screen.x; pixel.y = y - screen.y;
++            if (TheRadar->localPixelToRadar(&pixel, &radar) && TheRadar->radarToWorld(&radar, &world))
++                TheTacticalView->userLookAt(&world);
++        }
++        return MSG_HANDLED;
++    }
++    if (msg == GWM_LEFT_DOWN)
++    {
++        const CommandButton *command = TheInGameUI->getGUICommand();
++        // Explicit attack-move and special-power targeting retain immediate clicks.
++        if (!command)
++        {
++            ICoord2D screen, pixel, radar;
++            Coord3D world;
++            window->winGetScreenPosition(&screen.x, &screen.y);
++            pixel.x = static_cast<Short>(mData1 & 0xFFFF) - screen.x;
++            pixel.y = static_cast<Short>(mData1 >> 16) - screen.y;
++            if (TheRadar->localPixelToRadar(&pixel, &radar) && TheRadar->radarToWorld(&radar, &world) &&
++                TheWindowManager->winCapture(window) == WIN_ERR_OK)
++            {
++                gesture.window = window;
++                gesture.start = mData1;
++                gesture.dragging = FALSE;
++                gesture.pendingOrder = !TheGlobalData->m_useAlternateMouse &&
++                                       !TheInGameUI->getAllSelectedLocalDrawables()->empty();
++                if (!gesture.pendingOrder) TheTacticalView->userLookAt(&world);
++                return MSG_HANDLED;
++            }
++        }
++    }
++    return LeftHUDClick(window, msg, mData1, mData2);
++}
++
+ //-------------------------------------------------------------------------------------------------
+ /** Input procedure for the control bar */
+ //-------------------------------------------------------------------------------------------------
+@@ -607,3 +684,89 @@ void ToggleControlBar( Bool immediate )
+ //-------------------------------------------------------------------------------------------------
+ /** Resize the control bar */
+ //-------------------------------------------------------------------------------------------------
++// Bounded, opt-in native check invoked only by the camera diagnostic harness.
++bool cnc240::verifyMinimapDrag()
++{
++    GameWindow *window = TheWindowManager->winGetWindowFromId(nullptr, NAMEKEY("ControlBar.wnd:LeftHUD"));
++    if (!window || !rts::localPlayerHasRadar())
++    {
++        printf("CNC240_MINIMAP error=radar_unavailable\n");
++        return false;
++    }
++    ICoord2D origin, size;
++    window->winGetScreenPosition(&origin.x, &origin.y);
++    window->winGetSize(&size.x, &size.y);
++    ICoord2D mapLo, mapHi;
++    TheRadar->findDrawPositions(0, 0, size.x, size.y, &mapLo, &mapHi);
++    const Int mapWidth = mapHi.x - mapLo.x, mapHeight = mapHi.y - mapLo.y;
++    const ICoord2D a{origin.x + mapLo.x + mapWidth/2, origin.y + mapLo.y + mapHeight/2};
++    const ICoord2D b{origin.x + mapLo.x + mapWidth*3/4, a.y};
++    const ICoord2D c{origin.x + mapLo.x + mapWidth/4, a.y};
++    const ICoord2D outside{origin.x - 20, origin.y - 20};
++    const Coord2D originalPosition = TheTacticalView->getPosition2D();
++    const DrawableList selected = *TheInGameUI->getAllSelectedDrawables();
++    const CommandButton *command = TheInGameUI->getGUICommand();
++    const Bool alternate = TheGlobalData->m_useAlternateMouse;
++    TheInGameUI->deselectAllDrawables();
++    TheInGameUI->setGUICommand(nullptr);
++    const auto event = [](GameWindowMessage msg, ICoord2D point) {
++        ICoord2D delta{0, 0};
++        TheWindowManager->winProcessMouseEvent(msg, &point, &delta);
++    };
++    const auto different = [](Coord2D a, Coord2D b) {
++        return fabs(a.x-b.x) + fabs(a.y-b.y) > 1.0f;
++    };
++    const auto orders = []() {
++        Int count = 0;
++        for (GameMessage *m = TheMessageStream->getFirstMessage(); m; m = m->next())
++            if (m->getType() == GameMessage::MSG_DO_MOVETO) ++count;
++        return count;
++    };
++    event(GWM_LEFT_DOWN, a);
++    const bool captured = TheWindowManager->winGetCapture() == window;
++    const Coord2D first = TheTacticalView->getPosition2D();
++    event(GWM_LEFT_DRAG, b);
++    const Coord2D second = TheTacticalView->getPosition2D();
++    event(GWM_LEFT_DRAG, c);
++    const Coord2D third = TheTacticalView->getPosition2D();
++    event(GWM_LEFT_UP, outside);
++    const bool released = !TheWindowManager->winGetCapture();
++    event(GWM_LEFT_DRAG, b);
++    const bool stopped = !different(third, TheTacticalView->getPosition2D());
++    bool selectedDrag = false, selectedClick = false, alternateDrag = false;
++    Drawable *testDrawable = nullptr;
++    for (Object *o = TheGameLogic->getFirstObject(); o; o = o->getNextObject())
++        if (o->getControllingPlayer() == ThePlayerList->getLocalPlayer() && o->getDrawable())
++        { testDrawable = o->getDrawable(); break; }
++    if (testDrawable)
++    {
++        TheInGameUI->selectDrawable(testDrawable);
++        TheInGameUI->setGUICommand(nullptr);
++        TheWritableGlobalData->m_useAlternateMouse = FALSE;
++        const Int before = orders();
++        event(GWM_LEFT_DOWN, a); event(GWM_LEFT_DRAG, b); event(GWM_LEFT_UP, b);
++        selectedDrag = orders() == before && different(third, TheTacticalView->getPosition2D());
++        event(GWM_LEFT_DOWN, a); event(GWM_LEFT_UP, a);
++        selectedClick = orders() == before + 1;
++        // Remove only the test-generated move before it reaches game simulation.
++        GameMessage *lastMove = nullptr;
++        for (GameMessage *m = TheMessageStream->getFirstMessage(); m; m = m->next())
++            if (m->getType() == GameMessage::MSG_DO_MOVETO) lastMove = m;
++        if (selectedClick && lastMove) { TheMessageStream->removeMessage(lastMove); deleteInstance(lastMove); }
++        TheWritableGlobalData->m_useAlternateMouse = TRUE;
++        event(GWM_LEFT_DOWN, a);
++        const Coord2D altFirst = TheTacticalView->getPosition2D();
++        event(GWM_LEFT_DRAG, c); event(GWM_LEFT_UP, c);
++        alternateDrag = different(altFirst, TheTacticalView->getPosition2D()) && orders() == before;
++    }
++    TheWritableGlobalData->m_useAlternateMouse = alternate;
++    TheInGameUI->deselectAllDrawables();
++    for (Drawable *d : selected) TheInGameUI->selectDrawable(d);
++    TheInGameUI->setGUICommand(command);
++    TheTacticalView->setPosition2D(originalPosition);
++    const bool moved = different(first, second) && different(second, third);
++    printf("CNC240_MINIMAP captured=%d moved=%d released_outside=%d stopped=%d selected_drag_no_order=%d selected_click_order=%d alternate_drag=%d\n",
++           captured, moved, released, stopped, selectedDrag, selectedClick, alternateDrag);
++    fflush(stdout);
++    return captured && moved && released && stopped && selectedDrag && selectedClick && alternateDrag;
++}
+diff --git a/Core/GameEngine/Source/GameClient/GUI/LoadScreen.cpp b/Core/GameEngine/Source/GameClient/GUI/LoadScreen.cpp
+index e97fe8e..c58b9e9 100644
+--- a/Core/GameEngine/Source/GameClient/GUI/LoadScreen.cpp
++++ b/Core/GameEngine/Source/GameClient/GUI/LoadScreen.cpp
+@@ -464,6 +464,15 @@ void SinglePlayerLoadScreen::init( GameInfo *game )
+ 	DEBUG_ASSERTCRASH(m_cameoText, ("Can't initialize the m_cameoText for the single player loadscreen"));
+ 
+ */
++	// Bounded automated checks measure gameplay, excluding long briefing movies.
++	char verification[16] = {};
++	DWORD verificationLength = GetEnvironmentVariableA("CNC240_VERIFY_SECONDS", verification, sizeof(verification));
++	if (verificationLength > 0 && verificationLength < sizeof(verification) &&
++		atoi(verification) >= 1 && atoi(verification) <= 120)
++	{
++		m_percent->winHide(TRUE);
++		return;
++	}
+ 	m_ambientLoop.setEventName("LoadScreenAmbient");
+ 	// create the new stream
+ 	m_videoStream = TheVideoPlayer->open( TheCampaignManager->getCurrentMission()->m_movieLabel );
+diff --git a/Core/GameEngine/Source/GameClient/MessageStream/LookAtXlat.cpp b/Core/GameEngine/Source/GameClient/MessageStream/LookAtXlat.cpp
+index b4ef8bf..f21743d 100644
+--- a/Core/GameEngine/Source/GameClient/MessageStream/LookAtXlat.cpp
++++ b/Core/GameEngine/Source/GameClient/MessageStream/LookAtXlat.cpp
+@@ -29,6 +29,8 @@
+ #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
+ 
+ #include "Common/FramePacer.h"
++#include "Common/Cnc240Config.h"
++#include "Common/Cnc240RenderStats.h"
+ #include "Common/GameType.h"
+ #include "Common/GameEngine.h"
+ #include "Common/MessageStream.h"
+@@ -418,7 +420,7 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage
+ 			m_lastMouseMoveTimeMsec = timeGetTime();
+ 
+ 			const Real spin = msg->getArgument( 1 )->real;
+-			const Real zoom = -spin * View::ZoomHeightPerSecond;
++            const Real zoom = -spin * View::ZoomHeightPerSecond * cnc240::MouseWheelZoomSpeedMultiplier;
+ 			TheTacticalView->userZoom(zoom);
+ 
+ 			break;
+@@ -523,6 +525,8 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage
+ 						{
+ 							offset.x += TheGlobalData->m_horizontalScrollSpeedFactor * fpsRatio * SCROLL_AMT * TheGlobalData->m_keyboardScrollFactor;
+ 						}
++                        offset.x *= cnc240::MouseEdgeScrollSpeedMultiplier;
++                        offset.y *= cnc240::MouseEdgeScrollSpeedMultiplier;
+ 					}
+ 					break;
+ 				}
+@@ -777,3 +781,54 @@ void LookAtTranslator::resetModes()
+ 	m_isPitchingToDefault = FALSE;
+ 	m_isChangingFOV = FALSE;
+ }
++
++Bool LookAtTranslator::verifyCameraSpeed()
++{
++    if (m_isScrolling) return FALSE;
++    const Coord2D position = TheTacticalView->getPosition2D();
++    const ICoord2D current = m_currentPos;
++    const Real height = TheTacticalView->getHeightAboveGround();
++    TheTacticalView->setHeightAboveGround(450.0f);
++    const auto wheel = [this](Real spin) {
++        GameMessage *msg = newInstance(GameMessage)(GameMessage::MSG_RAW_MOUSE_WHEEL);
++        msg->appendPixelArgument(m_currentPos);
++        msg->appendRealArgument(spin);
++        translateGameMessage(msg);
++        deleteInstance(msg);
++    };
++    wheel(-1.0f);
++    const Real out = TheTacticalView->getHeightAboveGround() - 450.0f;
++    wheel(1.0f);
++    const Real in = 450.0f + out - TheTacticalView->getHeightAboveGround();
++    TheTacticalView->setHeightAboveGround(height);
++    Bool previousDirs[4];
++    for (Int i = 0; i < 4; ++i) { previousDirs[i] = scrollDir[i]; scrollDir[i] = FALSE; }
++    scrollDir[DIR_RIGHT] = TRUE;
++    GameMessage *tick = newInstance(GameMessage)(GameMessage::MSG_FRAME_TICK);
++    setScrolling(SCROLL_KEY);
++    translateGameMessage(tick);
++    const Coord2D keyboard = TheInGameUI->getScrollAmount();
++    stopScrolling();
++    m_currentPos = ICoord2D{static_cast<Int>(TheDisplay->getWidth()) - 1, static_cast<Int>(TheDisplay->getHeight()) / 2};
++    setScrolling(SCROLL_SCREENEDGE);
++    translateGameMessage(tick);
++    const Coord2D edge = TheInGameUI->getScrollAmount();
++    stopScrolling();
++    deleteInstance(tick);
++    m_currentPos = current;
++    for (Int i = 0; i < 4; ++i) scrollDir[i] = previousDirs[i];
++    TheTacticalView->setPosition2D(position);
++    const Coord2D zero{0.0f, 0.0f};
++    TheTacticalView->scrollBy(&zero);
++    TheInGameUI->setScrollAmount(zero);
++    const Real ratio = fabs(keyboard.x) > 0.0001f ? edge.x / keyboard.x : 0.0f;
++    const Bool passed = fabs(out - 30.0f) < 0.01f && fabs(in - 30.0f) < 0.01f && fabs(ratio - 3.0f) < 0.01f;
++    printf("CNC240_CAMERA_SPEED passed=%d wheel_out=%.2f wheel_in=%.2f edge_to_keyboard_ratio=%.2f\n", passed, out, in, ratio);
++    fflush(stdout);
++    return passed;
++}
++
++bool cnc240::verifyCameraSpeed()
++{
++    return TheLookAtTranslator && TheLookAtTranslator->verifyCameraSpeed();
++}
+diff --git a/Core/GameEngine/Source/GameClient/System/ParticleSys.cpp b/Core/GameEngine/Source/GameClient/System/ParticleSys.cpp
+index 11a17a1..56f6fb7 100644
+--- a/Core/GameEngine/Source/GameClient/System/ParticleSys.cpp
++++ b/Core/GameEngine/Source/GameClient/System/ParticleSys.cpp
+@@ -2882,6 +2882,14 @@ void ParticleSystem::loadPostProcess()
+ // ------------------------------------------------------------------------------------------------
+ /** INI parse data */
+ // ------------------------------------------------------------------------------------------------
++// Retail Generals data still supplies X/Y rotation fields. Their visual effect is
++// overwritten by billboard/ground alignment, but their syntax must remain valid.
++static void parseUnusedParticleRotation(INI *ini, void *instance, void *, const void *userData)
++{
++	GameClientRandomVariable discarded = {};
++	INI::parseGameClientRandomVariable(ini, instance, &discarded, userData);
++}
++
+ const FieldParse ParticleSystemTemplate::m_fieldParseTable[] =
+ {
+ 	{ "Priority",								INI::parseIndexList, ParticlePriorityNames, offsetof( ParticleSystemTemplate, m_priority ) },
+@@ -2892,11 +2900,17 @@ const FieldParse ParticleSystemTemplate::m_fieldParseTable[] =
+ #if PARTICLE_USE_XY_ROTATION
+ 	{ "AngleX",									INI::parseGameClientRandomVariable,	nullptr,		offsetof( ParticleSystemTemplate, m_angleX ) },
+ 	{ "AngleY",									INI::parseGameClientRandomVariable,	nullptr,		offsetof( ParticleSystemTemplate, m_angleY ) },
++#else
++	{ "AngleX", parseUnusedParticleRotation, nullptr, 0 },
++	{ "AngleY", parseUnusedParticleRotation, nullptr, 0 },
+ #endif
+ 	{ "AngleZ",									INI::parseGameClientRandomVariable,	nullptr,		offsetof( ParticleSystemTemplate, m_angleZ ) },
+ #if PARTICLE_USE_XY_ROTATION
+ 	{ "AngularRateX",						INI::parseGameClientRandomVariable,	nullptr,		offsetof( ParticleSystemTemplate, m_angularRateX ) },
+ 	{ "AngularRateY",						INI::parseGameClientRandomVariable,	nullptr,		offsetof( ParticleSystemTemplate, m_angularRateY ) },
++#else
++	{ "AngularRateX", parseUnusedParticleRotation, nullptr, 0 },
++	{ "AngularRateY", parseUnusedParticleRotation, nullptr, 0 },
+ #endif
+ 	{ "AngularRateZ",						INI::parseGameClientRandomVariable,	nullptr,		offsetof( ParticleSystemTemplate, m_angularRateZ ) },
+ 	{ "AngularDamping",					INI::parseGameClientRandomVariable,	nullptr,		offsetof( ParticleSystemTemplate, m_angularDamping ) },
+diff --git a/Core/GameEngine/Source/GameClient/View.cpp b/Core/GameEngine/Source/GameClient/View.cpp
+index 8a8886a..870ef1e 100644
+--- a/Core/GameEngine/Source/GameClient/View.cpp
++++ b/Core/GameEngine/Source/GameClient/View.cpp
+@@ -29,6 +29,7 @@
+ #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
+ 
+ #include "Common/GameEngine.h"
++#include "Common/Cnc240Config.h"
+ #include "Common/Xfer.h"
+ #include "GameClient/Drawable.h"
+ #include "GameClient/GameClient.h"
+@@ -202,7 +203,8 @@ void View::setHeightAboveGround(Real z)
+ 	// if our zoom is limited, we will stay within a predefined distance from the terrain
+ 	if( m_zoomLimited )
+ 	{
+-		m_heightAboveGround = clamp(m_minHeightAboveGround, z, m_maxHeightAboveGround);
++		const Real maximum = m_isUserControlled ? max(m_maxHeightAboveGround, cnc240::UserCameraMaximumHeight) : m_maxHeightAboveGround;
++		m_heightAboveGround = clamp(m_minHeightAboveGround, z, maximum);
+ 	}
+ 	else
+ 	{
+diff --git a/Core/GameEngine/Source/GameLogic/System/GameLogicDispatch.cpp b/Core/GameEngine/Source/GameLogic/System/GameLogicDispatch.cpp
+index f40eb60..28e424c 100644
+--- a/Core/GameEngine/Source/GameLogic/System/GameLogicDispatch.cpp
++++ b/Core/GameEngine/Source/GameLogic/System/GameLogicDispatch.cpp
+@@ -883,7 +883,9 @@ bool GameLogic::onNewGame(MAYBE_UNUSED GameMessage *msg)
+ 		if (maxFPS < 1 || maxFPS > 1000)
+ 			maxFPS = TheGlobalData->m_framesPerSecondLimit;
+ 		DEBUG_LOG(("Setting max FPS limit to %d FPS", maxFPS));
+-		TheFramePacer->setFramesPerSecondLimit(maxFPS);
++		// The menu's legacy FPS argument controls game speed, not render cadence.
++		TheFramePacer->setLogicTimeScaleFps(maxFPS);
++		TheFramePacer->enableLogicTimeScale(TRUE);
+ 		TheWritableGlobalData->m_useFpsLimit = true;
+ 	}
+ 
+diff --git a/Core/GameEngineDevice/Include/W3DDevice/GameClient/WorldHeightMap.h b/Core/GameEngineDevice/Include/W3DDevice/GameClient/WorldHeightMap.h
+index 10176bf..a0812b3 100644
+--- a/Core/GameEngineDevice/Include/W3DDevice/GameClient/WorldHeightMap.h
++++ b/Core/GameEngineDevice/Include/W3DDevice/GameClient/WorldHeightMap.h
+@@ -85,6 +85,7 @@ typedef struct {
+ #define NUM_TEXTURE_CLASSES 256
+ 
+ 
++class CameraClass;
+ class TextureClass;
+ class ChunkInputStream;
+ class InputStream;
+@@ -245,6 +246,7 @@ public:  // height map info.
+ 	Int getYExtent() const {return m_height;}	///<number of vertices in y
+ 
+ 	Region2D getDrawRegion2D();
++	IRegion2D getCameraDrawBounds(const CameraClass &camera) const;
+ 
+ 	Int getDrawOrgX() {return m_drawOriginX;}
+ 	Int getDrawOrgY() {return m_drawOriginY;}
+diff --git a/Core/GameEngineDevice/Source/W3DDevice/GameClient/HeightMap.cpp b/Core/GameEngineDevice/Source/W3DDevice/GameClient/HeightMap.cpp
+index cea9b8e..e6f6ab0 100644
+--- a/Core/GameEngineDevice/Source/W3DDevice/GameClient/HeightMap.cpp
++++ b/Core/GameEngineDevice/Source/W3DDevice/GameClient/HeightMap.cpp
+@@ -1666,7 +1666,15 @@ void HeightMapRenderObjClass::updateCenter(CameraClass *camera, const Vector3 *c
+ 	Int newOrgX;
+ 	Int newOrgY;
+ 
+-	if (cameraPitch > ViewDefaultLowPitchRadians)
++    if (TheTacticalView && TheTacticalView->isUserControlled() &&
++        TheTacticalView->getCurrentHeightAboveGround() > TheGlobalData->m_maxCameraHeight + 1.0f)
++    {
++        // Center the enlarged patch on the same footprint used to size it.
++        const IRegion2D bounds = m_map->getCameraDrawBounds(*camera);
++        newOrgX = (bounds.lo.x + bounds.hi.x) / 2 - m_x / 2;
++        newOrgY = (bounds.lo.y + bounds.hi.y) / 2 - m_y / 2;
++    }
++    else if (cameraPitch > ViewDefaultLowPitchRadians)
+ 	{
+ 		// TheSuperHackers @info This is the original code to determine the center position for the visible terrain area.
+ 		// It is relatively expensive and breaks when the frustum planes can no longer intersect with the terrain at low camera
+diff --git a/Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DDisplay.cpp b/Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DDisplay.cpp
+index b7d6a44..8259410 100644
+--- a/Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DDisplay.cpp
++++ b/Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DDisplay.cpp
+@@ -42,6 +42,8 @@ static void drawFramerateBar();
+ 
+ // USER INCLUDES //////////////////////////////////////////////////////////////
+ #include "Common/FramePacer.h"
++#include "Common/Cnc240RenderStats.h"
++#include "W3DDevice/GameClient/W3DView.h"
+ #include "Common/ThingFactory.h"
+ #include "Common/GlobalData.h"
+ #include "Common/PerfTimer.h"
+@@ -111,6 +113,28 @@ static void drawFramerateBar();
+ 
+ #include "WinMain.h"
+ 
++unsigned long cnc240::getPresentedFrameCount()
++{
++	return DX8Wrapper::Get_FrameCount();
++}
++
++bool cnc240::checkTerrainCoverage()
++{
++    if (!TheTerrainRenderObject || !TheTerrainRenderObject->getMap() || !TheTacticalView)
++        return false;
++    WorldHeightMap *map = TheTerrainRenderObject->getMap();
++    const CameraClass *camera = static_cast<W3DView *>(TheTacticalView)->get3DCamera();
++    const IRegion2D required = map->getCameraDrawBounds(*camera);
++    const bool covered = map->getDrawOrgX() <= required.lo.x && map->getDrawOrgY() <= required.lo.y &&
++        map->getDrawOrgX() + map->getDrawWidth() - 1 >= required.hi.x &&
++        map->getDrawOrgY() + map->getDrawHeight() - 1 >= required.hi.y;
++    printf("CNC240_TERRAIN covered=%d draw=%dx%d map=%dx%d origin=%d,%d required=%d,%d:%d,%d\n",
++           covered, map->getDrawWidth(), map->getDrawHeight(), map->getXExtent(), map->getYExtent(),
++           map->getDrawOrgX(), map->getDrawOrgY(), required.lo.x, required.lo.y, required.hi.x, required.hi.y);
++    fflush(stdout);
++    return covered;
++}
++
+ 
+ // DEFINE AND ENUMS ///////////////////////////////////////////////////////////
+ 
+diff --git a/Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DView.cpp b/Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DView.cpp
+index d438761..c50b3ca 100644
+--- a/Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DView.cpp
++++ b/Core/GameEngineDevice/Source/W3DDevice/GameClient/W3DView.cpp
+@@ -41,6 +41,7 @@
+ 
+ #include "Common/BuildAssistant.h"
+ #include "Common/FramePacer.h"
++#include "Common/Cnc240Config.h"
+ #include "Common/GameUtility.h"
+ #include "Common/GlobalData.h"
+ #include "Common/Module.h"
+@@ -443,7 +444,13 @@ Bool W3DView::zoomCameraToDesiredHeight()
+ 	if (fabs(adjustZoom) >= 0.001f)
+ 	{
+ 		const Real fpsRatio = TheFramePacer->getBaseOverUpdateFpsRatio();
+-		const Real adjustFactor = std::min(TheGlobalData->m_cameraAdjustSpeed * fpsRatio, 1.0f);
++		Real adjustFactor = std::min(TheGlobalData->m_cameraAdjustSpeed * fpsRatio, 1.0f);
++        if (m_isUserControlled)
++        {
++            // Three normal settling steps per update: faster response without overshoot.
++            const Real remaining = 1.0f - adjustFactor;
++            adjustFactor = 1.0f - remaining * remaining * remaining;
++        }
+ 		m_zoom += adjustZoom * adjustFactor;
+ 		return true;
+ 	}
+@@ -633,7 +640,8 @@ Bool W3DView::isWithinCameraAreaConstraints() const
+ Bool W3DView::isWithinCameraHeightConstraints() const
+ {
+ 	const Bool isAboveMinHeight = m_currentHeightAboveGround >= m_minHeightAboveGround;
+-	const Bool isBelowMaxHeight = m_currentHeightAboveGround <= m_maxHeightAboveGround;
++	const Real maximum = m_isUserControlled ? max(m_maxHeightAboveGround, cnc240::UserCameraMaximumHeight) : m_maxHeightAboveGround;
++	const Bool isBelowMaxHeight = m_currentHeightAboveGround <= maximum;
+ 	return isAboveMinHeight && (isBelowMaxHeight || !TheGlobalData->m_enforceMaxCameraHeight);
+ }
+ 
+@@ -3721,6 +3729,27 @@ bool W3DView::getDesiredTerrainDrawSize(ICoord2D &dimensions) const
+ 		return false;
+ 	}
+ 
++    // Allocate in whole 32-cell tiles, with a spare tile on each side for panning.
++    // Small zoom changes inside a tile bucket do not rebuild terrain buffers.
++    if (m_isUserControlled && m_currentHeightAboveGround > TheGlobalData->m_maxCameraHeight + 1.0f)
++    {
++        if (const WorldHeightMap *map = TheTerrainRenderObject->getMap())
++        {
++            const IRegion2D bounds = map->getCameraDrawBounds(*m_3DCamera);
++            const auto size = [](Int span) {
++                return 1 + ((span + VERTEX_BUFFER_TILE_LENGTH - 1) / VERTEX_BUFFER_TILE_LENGTH + 2) * VERTEX_BUFFER_TILE_LENGTH;
++            };
++            dimensions.x = std::max(static_cast<Int>(WorldHeightMap::NORMAL_DRAW_WIDTH), size(bounds.hi.x - bounds.lo.x));
++            dimensions.y = std::max(static_cast<Int>(WorldHeightMap::NORMAL_DRAW_HEIGHT), size(bounds.hi.y - bounds.lo.y));
++            // Keep the high-zoom allocation while panning near map edges. Return
++            // to stock size once zoomed back in, rather than churn GPU buffers.
++            WorldHeightMap *allocated = TheTerrainRenderObject->getMap();
++            dimensions.x = std::max(dimensions.x, allocated->getDrawWidth());
++            dimensions.y = std::max(dimensions.y, allocated->getDrawHeight());
++            return true;
++        }
++    }
++
+ 	const Real cameraPitch = asin(fabs(m_3DCamera->Get_Forward_Dir().Z));
+ 
+ 	if (cameraPitch > ViewDefaultLowPitchRadians || !m_isUserControlled)
+diff --git a/Core/GameEngineDevice/Source/W3DDevice/GameClient/WorldHeightMap.cpp b/Core/GameEngineDevice/Source/W3DDevice/GameClient/WorldHeightMap.cpp
+index c12e28b..0ff5843 100644
+--- a/Core/GameEngineDevice/Source/W3DDevice/GameClient/WorldHeightMap.cpp
++++ b/Core/GameEngineDevice/Source/W3DDevice/GameClient/WorldHeightMap.cpp
+@@ -52,12 +52,50 @@
+ #include "W3DDevice/GameClient/W3DShadow.h"
+ 
+ #include "Common/file.h"
++#include "WW3D2/camera.h"
++#include <algorithm>
++#include <cmath>
+ 
+ 
+ #define K_OBSOLETE_HEIGHT_MAP_VERSION 8
+ 
+ #define PATHFIND_CLIFF_SLOPE_LIMIT_F	9.8f
+ 
++// Ground footprint in map vertex coordinates, including every legal terrain height.
++// Bounds are clipped to the real map; a sky-facing corner needs the whole map.
++IRegion2D WorldHeightMap::getCameraDrawBounds(const CameraClass &camera) const
++{
++    Vector2 lo, hi;
++    camera.Get_View_Plane(lo, hi);
++    const Matrix3D &matrix = camera.Get_Transform();
++    const Vector3 origin = camera.Get_Position();
++    Real minX = static_cast<Real>(m_width - 1), minY = static_cast<Real>(m_height - 1);
++    Real maxX = 0, maxY = 0;
++    for (Int x = 0; x < 2; ++x)
++    for (Int y = 0; y < 2; ++y)
++    {
++        const Real px = x ? hi.X : lo.X;
++        const Real py = y ? hi.Y : lo.Y;
++        const Vector3 ray(
++            matrix[0][0]*px + matrix[0][1]*py - matrix[0][2],
++            matrix[1][0]*px + matrix[1][1]*py - matrix[1][2],
++            matrix[2][0]*px + matrix[2][1]*py - matrix[2][2]);
++        if (ray.Z >= -0.0001f)
++            return IRegion2D{{0, 0}, {m_width - 1, m_height - 1}};
++        for (Int top = 0; top < 2; ++top)
++        {
++            const Real groundZ = top ? K_MAX_HEIGHT * MAP_HEIGHT_SCALE : 0.0f;
++            const Real distance = std::max(0.0f, (groundZ - origin.Z) / ray.Z);
++            const Real cellX = std::clamp((origin.X + ray.X*distance)/MAP_XY_FACTOR + m_borderSize, 0.0f, static_cast<Real>(m_width - 1));
++            const Real cellY = std::clamp((origin.Y + ray.Y*distance)/MAP_XY_FACTOR + m_borderSize, 0.0f, static_cast<Real>(m_height - 1));
++            minX = std::min(minX, cellX); maxX = std::max(maxX, cellX);
++            minY = std::min(minY, cellY); maxY = std::max(maxY, cellY);
++        }
++    }
++    return IRegion2D{{static_cast<Int>(floor(minX)), static_cast<Int>(floor(minY))},
++                    {static_cast<Int>(ceil(maxX)), static_cast<Int>(ceil(maxY))}};
++}
++
+ // -----------------------------------------------------------
+ static AsciiString validateName(AsciiString n, Int flags)
+ {
+diff --git a/Generals/Code/GameEngine/Source/Common/GameEngine.cpp b/Generals/Code/GameEngine/Source/Common/GameEngine.cpp
+index 0393210..ecc7616 100644
+--- a/Generals/Code/GameEngine/Source/Common/GameEngine.cpp
++++ b/Generals/Code/GameEngine/Source/Common/GameEngine.cpp
+@@ -82,6 +82,7 @@
+ #include "GameLogic/RankInfo.h"
+ #include "GameLogic/ScriptEngine.h"
+ #include "GameLogic/SidesList.h"
++#include "Common/Cnc240Diagnostics.h"
+ 
+ #include "GameClient/ClientInstance.h"
+ #include "GameClient/FXList.h"
+@@ -512,7 +513,7 @@ void GameEngine::init()
+ 
+ 		TheSubsystemList->postProcessLoadAll();
+ 
+-		TheFramePacer->setFramesPerSecondLimit(TheGlobalData->m_framesPerSecondLimit);
++		TheFramePacer->setLogicTimeScaleFps(TheGlobalData->m_framesPerSecondLimit);
+ 
+ 		TheAudio->setOn(TheGlobalData->m_audioOn && TheGlobalData->m_musicOn, AudioAffect_Music);
+ 		TheAudio->setOn(TheGlobalData->m_audioOn && TheGlobalData->m_soundsOn, AudioAffect_Sound);
+@@ -774,6 +775,7 @@ extern HWND ApplicationHWnd;
+  */
+ void GameEngine::execute()
+ {
++	cnc240::TimingCheck timingCheck;
+ #if defined(RTS_DEBUG)
+ 	DWORD startTime = timeGetTime() / 1000;
+ #endif
+@@ -843,6 +845,7 @@ void GameEngine::execute()
+ 			}
+ 
+ 			TheFramePacer->update();
++			if (timingCheck.update()) setQuitting(TRUE);
+ 		}
+ 
+ #ifdef PERF_TIMERS
+diff --git a/Generals/Code/GameEngine/Source/Common/GlobalData.cpp b/Generals/Code/GameEngine/Source/Common/GlobalData.cpp
+index 4dfee31..3862e2e 100644
+--- a/Generals/Code/GameEngine/Source/Common/GlobalData.cpp
++++ b/Generals/Code/GameEngine/Source/Common/GlobalData.cpp
+@@ -32,6 +32,7 @@
+ // INCLUDES ///////////////////////////////////////////////////////////////////////////////////////
+ #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
+ 
++#include "GameClient/ClientInstance.h"
+ #include "WW3D2/ww3d.h"
+ #include "WW3D2/texturefilter.h"
+ 
+@@ -1334,6 +1335,30 @@ UnsignedInt GlobalData::generateExeCRC()
+ 
+ AsciiString GlobalData::BuildUserDataPathFromIni()
+ {
++	// Reserve the instance before constructing user paths (Zero Hour loads GlobalData early).
++	rts::ClientInstance::initialize();
++	// The isolated launcher supplies a private profile without changing the registry.
++	char profile[MAX_PATH];
++	DWORD profileLength = GetEnvironmentVariableA("CNC240_USER_DATA", profile, MAX_PATH);
++	if (profileLength >= 3 && profileLength < MAX_PATH &&
++		((profile[1] == ':' && profile[2] == '\\') || (profile[0] == '\\' && profile[1] == '\\')))
++	{
++		AsciiString result = profile;
++		if (!result.endsWith("\\")) result.concat('\\');
++        // Concurrent worlds must never share saves, replay files or options writes.
++        if (rts::ClientInstance::getInstanceId()>1) {
++            CreateDirectoryA(result.str(), nullptr);
++            AsciiString primary=result; primary.concat("Options.ini");
++            result.concat("instances\\"); CreateDirectoryA(result.str(), nullptr);
++            AsciiString suffix; suffix.format("instance-%02u\\", rts::ClientInstance::getInstanceId());
++            result.concat(suffix); CreateDirectoryA(result.str(), nullptr);
++            AsciiString options=result; options.concat("Options.ini");
++            CopyFileA(primary.str(),options.str(),TRUE);
++            AsciiString indexed=result; suffix.format("Options_Instance%02u.ini",rts::ClientInstance::getInstanceId());
++            indexed.concat(suffix); CopyFileA(primary.str(),indexed.str(),TRUE);
++        }
++		return result;
++	}
+ #if defined(_MSC_VER) && (_MSC_VER < 1300)
+ 	// VC6 lacks FOLDERID_Documents and KF_FLAG_DEFAULT
+ 	const GUID FOLDERID_Documents = { 0xFDD39AD0, 0x238F, 0x46AF, 0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7 };
+diff --git a/Generals/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptActions.cpp b/Generals/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptActions.cpp
+index 2b75f0a..45cfc11 100644
+--- a/Generals/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptActions.cpp
++++ b/Generals/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptActions.cpp
+@@ -6587,12 +6587,13 @@ void ScriptActions::executeAction( ScriptAction *pAction )
+ 		case ScriptAction::SET_FPS_LIMIT:
+ 			if (!pAction->getParameter(0)->getInt())
+ 			{
+-				TheFramePacer->setFramesPerSecondLimit(TheGlobalData->m_framesPerSecondLimit);
++				TheFramePacer->setLogicTimeScaleFps(TheGlobalData->m_framesPerSecondLimit);
+ 			}
+ 			else
+ 			{
+-				TheFramePacer->setFramesPerSecondLimit(pAction->getParameter(0)->getInt());
++				TheFramePacer->setLogicTimeScaleFps(pAction->getParameter(0)->getInt());
+ 			}
++			TheFramePacer->enableLogicTimeScale(TRUE);
+ 			// Setting the fps limit doesn't do much good if we don't use it.  jba.
+ 			TheWritableGlobalData->m_useFpsLimit = true;
+ 			return;
+diff --git a/Generals/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptEngine.cpp b/Generals/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptEngine.cpp
+index ea18933..fe13941 100644
+--- a/Generals/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptEngine.cpp
++++ b/Generals/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptEngine.cpp
+@@ -4546,9 +4546,12 @@ void ScriptEngine::init()
+ //-------------------------------------------------------------------------------------------------
+ void ScriptEngine::reset()
+ {
+-	// setting FPS limit in case a script had changed it
++	// Restore scripted simulation speed while preserving the selected render limit.
+ 	if (TheFramePacer && TheGlobalData)
+-		TheFramePacer->setFramesPerSecondLimit(TheGlobalData->m_framesPerSecondLimit);
++	{
++		TheFramePacer->setLogicTimeScaleFps(TheGlobalData->m_framesPerSecondLimit);
++		TheFramePacer->enableLogicTimeScale(TRUE);
++	}
+ 
+ 	if (TheScriptActions) {
+ 		TheScriptActions->reset();
+diff --git a/Generals/Code/Main/RTS.RC b/Generals/Code/Main/RTS.RC
+index b4e435f..9f2330a 100644
+--- a/Generals/Code/Main/RTS.RC
++++ b/Generals/Code/Main/RTS.RC
+@@ -7,7 +7,7 @@
+ //
+ // Generated from the TEXTINCLUDE 2 resource.
+ //
+-#include "afxres.h"
++#include <windows.h>
+ 
+ /////////////////////////////////////////////////////////////////////////////
+ #undef APSTUDIO_READONLY_SYMBOLS
+@@ -34,7 +34,7 @@ END
+ 
+ 2 TEXTINCLUDE DISCARDABLE 
+ BEGIN
+-    "#include ""afxres.h""\r\n"
++    "#include <windows.h>\r\n"
+     "\0"
+ END
+ 
+diff --git a/GeneralsMD/Code/GameEngine/Source/Common/GameEngine.cpp b/GeneralsMD/Code/GameEngine/Source/Common/GameEngine.cpp
+index 5d7b450..53e7d2a 100644
+--- a/GeneralsMD/Code/GameEngine/Source/Common/GameEngine.cpp
++++ b/GeneralsMD/Code/GameEngine/Source/Common/GameEngine.cpp
+@@ -84,6 +84,7 @@
+ #include "GameLogic/RankInfo.h"
+ #include "GameLogic/ScriptEngine.h"
+ #include "GameLogic/SidesList.h"
++#include "Common/Cnc240Diagnostics.h"
+ 
+ #include "GameClient/ClientInstance.h"
+ #include "GameClient/FXList.h"
+@@ -666,7 +667,7 @@ void GameEngine::init()
+ 
+ 		TheSubsystemList->postProcessLoadAll();
+ 
+-		TheFramePacer->setFramesPerSecondLimit(TheGlobalData->m_framesPerSecondLimit);
++		TheFramePacer->setLogicTimeScaleFps(TheGlobalData->m_framesPerSecondLimit);
+ 
+ 		TheAudio->setOn(TheGlobalData->m_audioOn && TheGlobalData->m_musicOn, AudioAffect_Music);
+ 		TheAudio->setOn(TheGlobalData->m_audioOn && TheGlobalData->m_soundsOn, AudioAffect_Sound);
+@@ -937,6 +938,7 @@ extern HWND ApplicationHWnd;
+  */
+ void GameEngine::execute()
+ {
++	cnc240::TimingCheck timingCheck;
+ #if defined(RTS_DEBUG)
+ 	DWORD startTime = timeGetTime() / 1000;
+ #endif
+@@ -1006,6 +1008,7 @@ void GameEngine::execute()
+ 			}
+ 
+ 			TheFramePacer->update();
++			if (timingCheck.update()) setQuitting(TRUE);
+ 		}
+ 
+ #ifdef PERF_TIMERS
+diff --git a/GeneralsMD/Code/GameEngine/Source/Common/GlobalData.cpp b/GeneralsMD/Code/GameEngine/Source/Common/GlobalData.cpp
+index 2ca6851..a335230 100644
+--- a/GeneralsMD/Code/GameEngine/Source/Common/GlobalData.cpp
++++ b/GeneralsMD/Code/GameEngine/Source/Common/GlobalData.cpp
+@@ -32,6 +32,7 @@
+ // INCLUDES ///////////////////////////////////////////////////////////////////////////////////////
+ #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
+ 
++#include "GameClient/ClientInstance.h"
+ #include "WW3D2/ww3d.h"
+ #include "WW3D2/texturefilter.h"
+ 
+@@ -1339,6 +1340,30 @@ UnsignedInt GlobalData::generateExeCRC()
+ 
+ AsciiString GlobalData::BuildUserDataPathFromRegistry()
+ {
++	// Reserve the instance before constructing user paths (Zero Hour loads GlobalData early).
++	rts::ClientInstance::initialize();
++	// The isolated launcher supplies a private profile without changing the registry.
++	char profile[MAX_PATH];
++	DWORD profileLength = GetEnvironmentVariableA("CNC240_USER_DATA", profile, MAX_PATH);
++	if (profileLength >= 3 && profileLength < MAX_PATH &&
++		((profile[1] == ':' && profile[2] == '\\') || (profile[0] == '\\' && profile[1] == '\\')))
++	{
++		AsciiString result = profile;
++		if (!result.endsWith("\\")) result.concat('\\');
++        // Concurrent worlds must never share saves, replay files or options writes.
++        if (rts::ClientInstance::getInstanceId()>1) {
++            CreateDirectoryA(result.str(), nullptr);
++            AsciiString primary=result; primary.concat("Options.ini");
++            result.concat("instances\\"); CreateDirectoryA(result.str(), nullptr);
++            AsciiString suffix; suffix.format("instance-%02u\\", rts::ClientInstance::getInstanceId());
++            result.concat(suffix); CreateDirectoryA(result.str(), nullptr);
++            AsciiString options=result; options.concat("Options.ini");
++            CopyFileA(primary.str(),options.str(),TRUE);
++            AsciiString indexed=result; suffix.format("Options_Instance%02u.ini",rts::ClientInstance::getInstanceId());
++            indexed.concat(suffix); CopyFileA(primary.str(),indexed.str(),TRUE);
++        }
++		return result;
++	}
+ #if defined(_MSC_VER) && (_MSC_VER < 1300)
+ 	// VC6 lacks FOLDERID_Documents and KF_FLAG_DEFAULT
+ 	const GUID FOLDERID_Documents = { 0xFDD39AD0, 0x238F, 0x46AF, 0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7 };
+diff --git a/GeneralsMD/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptActions.cpp b/GeneralsMD/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptActions.cpp
+index 04d6c71..31fea9a 100644
+--- a/GeneralsMD/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptActions.cpp
++++ b/GeneralsMD/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptActions.cpp
+@@ -7206,12 +7206,13 @@ void ScriptActions::executeAction( ScriptAction *pAction )
+ 		case ScriptAction::SET_FPS_LIMIT:
+ 			if (!pAction->getParameter(0)->getInt())
+ 			{
+-				TheFramePacer->setFramesPerSecondLimit(TheGlobalData->m_framesPerSecondLimit);
++				TheFramePacer->setLogicTimeScaleFps(TheGlobalData->m_framesPerSecondLimit);
+ 			}
+ 			else
+ 			{
+-				TheFramePacer->setFramesPerSecondLimit(pAction->getParameter(0)->getInt());
++				TheFramePacer->setLogicTimeScaleFps(pAction->getParameter(0)->getInt());
+ 			}
++			TheFramePacer->enableLogicTimeScale(TRUE);
+ 			// Setting the fps limit doesn't do much good if we don't use it.  jba.
+ 			TheWritableGlobalData->m_useFpsLimit = true;
+ 			return;
+diff --git a/GeneralsMD/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptEngine.cpp b/GeneralsMD/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptEngine.cpp
+index 7311db6..ec68a3e 100644
+--- a/GeneralsMD/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptEngine.cpp
++++ b/GeneralsMD/Code/GameEngine/Source/GameLogic/ScriptEngine/ScriptEngine.cpp
+@@ -5261,9 +5261,12 @@ void ScriptEngine::init()
+ //-------------------------------------------------------------------------------------------------
+ void ScriptEngine::reset()
+ {
+-	// setting FPS limit in case a script had changed it
++	// Restore scripted simulation speed while preserving the selected render limit.
+ 	if (TheFramePacer && TheGlobalData)
+-		TheFramePacer->setFramesPerSecondLimit(TheGlobalData->m_framesPerSecondLimit);
++	{
++		TheFramePacer->setLogicTimeScaleFps(TheGlobalData->m_framesPerSecondLimit);
++		TheFramePacer->enableLogicTimeScale(TRUE);
++	}
+ 
+ 	if (TheScriptActions) {
+ 		TheScriptActions->reset();
+diff --git a/GeneralsMD/Code/Main/RTS.RC b/GeneralsMD/Code/Main/RTS.RC
+index faa4ee8..e28b760 100644
+--- a/GeneralsMD/Code/Main/RTS.RC
++++ b/GeneralsMD/Code/Main/RTS.RC
+@@ -7,7 +7,7 @@
+ //
+ // Generated from the TEXTINCLUDE 2 resource.
+ //
+-#include "afxres.h"
++#include <windows.h>
+ 
+ /////////////////////////////////////////////////////////////////////////////
+ #undef APSTUDIO_READONLY_SYMBOLS
+@@ -34,7 +34,7 @@ END
+ 
+ 2 TEXTINCLUDE DISCARDABLE 
+ BEGIN
+-    "#include ""afxres.h""\r\n"
++    "#include <windows.h>\r\n"
+     "\0"
+ END
+ 
+diff --git a/Core/GameEngine/Include/Common/Cnc240Config.h b/Core/GameEngine/Include/Common/Cnc240Config.h
+new file mode 100644
+--- /dev/null
++++ b/Core/GameEngine/Include/Common/Cnc240Config.h
+@@ -0,0 +1,17 @@
++// C&C 240 local engine changes, 2026.
++// GPL-3.0-or-later with the additional EA terms in the repository LICENSE.md.
++#pragma once
++
++namespace cnc240
++{
++    enum { MinimumRenderFps = 30, MaximumRenderFps = 240, DefaultRenderFps = 240 };
++    constexpr float UserCameraMaximumHeight = 900.0f;
++    constexpr float MouseWheelZoomSpeedMultiplier = 3.0f;
++    constexpr float MouseEdgeScrollSpeedMultiplier = 3.0f;
++
++    inline int clampRenderFps(int fps)
++    {
++        return fps < MinimumRenderFps ? MinimumRenderFps :
++               fps > MaximumRenderFps ? MaximumRenderFps : fps;
++    }
++}
+diff --git a/Core/GameEngine/Include/Common/Cnc240Diagnostics.h b/Core/GameEngine/Include/Common/Cnc240Diagnostics.h
+new file mode 100644
+--- /dev/null
++++ b/Core/GameEngine/Include/Common/Cnc240Diagnostics.h
+@@ -0,0 +1,164 @@
++// C&C 240 local engine changes, 2026.
++// GPL-3.0-or-later with the additional EA terms in LICENSE.md.
++#pragma once
++#include "GameClient/CampaignManager.h"
++#include "GameNetwork/GameInfo.h"
++#include "Common/RandomValue.h"
++#include "Common/Cnc240RenderStats.h"
++#include "GameClient/View.h"
++
++namespace cnc240
++{
++    // Opt-in bounded runtime check. Normal launches never enable this.
++    class TimingCheck
++    {
++    public:
++        TimingCheck() : m_start(GetTickCount()), m_lastReport(m_start), m_renders(0), m_logic(0),
++                        m_lastLogic(TheGameLogic->getFrame()), m_presentStart(getPresentedFrameCount()),
++                        m_seconds(0), m_started(false), m_crcReported(false), m_zoomCheck(false), m_zoomRequested(false), m_zoomReported(false), m_coverageStage(0)
++        {
++            char value[16] = {};
++            const DWORD length = GetEnvironmentVariableA("CNC240_VERIFY_SECONDS", value, sizeof(value));
++            if (length > 0 && length < sizeof(value))
++                m_seconds = atoi(value);
++            if (m_seconds < 1 || m_seconds > 120) m_seconds = 0;
++            char zoomValue[4] = {};
++            m_zoomCheck = m_seconds && GetEnvironmentVariableA("CNC240_VERIFY_ZOOM", zoomValue, sizeof(zoomValue)) == 1 && zoomValue[0] == '1';
++            m_scenario[0] = '\0';
++            if (m_seconds && GetEnvironmentVariableA("CNC240_VERIFY_SCENARIO", m_scenario, sizeof(m_scenario)) >= sizeof(m_scenario))
++                m_scenario[0] = '\0';
++        }
++
++        bool update()
++        {
++            if (!m_seconds) return false;
++            if (!m_started && m_scenario[0] && GetTickCount() - m_start >= 1000)
++            {
++                m_started = true;
++                if (strcmp(m_scenario, "skirmish") == 0)
++                {
++                    if (!TheSkirmishGameInfo) TheSkirmishGameInfo = NEW SkirmishGameInfo;
++                    TheSkirmishGameInfo->init();
++                    TheSkirmishGameInfo->clearSlotList();
++                    TheSkirmishGameInfo->enterGame();
++                    TheSkirmishGameInfo->setLocalIP(0);
++                    TheSkirmishGameInfo->setSeed(12345);
++                    GameSlot *human = TheSkirmishGameInfo->getSlot(0);
++                    human->setState(SLOT_PLAYER, UnicodeString(L"Cnc240 verification"));
++                    human->setPlayerTemplate(2); // Stock FactionAmerica, after civilian/observer.
++                    human->setColor(0);
++                    human->setStartPos(0);
++                    human->setAccept();
++                    human->setMapAvailability(TRUE);
++                    GameSlot *ai = TheSkirmishGameInfo->getSlot(1);
++                    ai->setState(SLOT_MED_AI);
++                    ai->setPlayerTemplate(3); // Stock FactionChina.
++                    ai->setColor(1);
++                    ai->setStartPos(1);
++                    TheSkirmishGameInfo->setMap("Maps\\Alpine Assault\\Alpine Assault.map");
++                    TheSkirmishGameInfo->startGame(0);
++                    TheWritableGlobalData->m_mapName = TheSkirmishGameInfo->getMap();
++                    InitRandom(12345);
++                    TheGameLogic->prepareNewGame(GAME_SKIRMISH, DIFFICULTY_NORMAL, 0);
++                }
++                else
++                {
++                    TheCampaignManager->setCampaign(m_scenario);
++                    if (TheCampaignManager->getCurrentMap().isEmpty())
++                    {
++                        printf("CNC240_SCENARIO_ERROR unknown campaign=%s\n", m_scenario);
++                        fflush(stdout);
++                        return true;
++                    }
++                    TheCampaignManager->setGameDifficulty(DIFFICULTY_NORMAL);
++                    TheWritableGlobalData->m_pendingFile = TheCampaignManager->getCurrentMap();
++                    InitRandom(0);
++                    TheGameLogic->prepareNewGame(GAME_SINGLE_PLAYER, DIFFICULTY_NORMAL, 0);
++                }
++                TheGameLogic->startNewGame(FALSE);
++                printf("CNC240_SCENARIO started=%s\n", m_scenario);
++                fflush(stdout);
++                m_start = m_lastReport = GetTickCount();
++                m_renders = m_logic = 0;
++                m_lastLogic = TheGameLogic->getFrame();
++                m_presentStart = getPresentedFrameCount();
++            }
++            ++m_renders;
++            const unsigned int frame = TheGameLogic->getFrame();
++            if (m_zoomCheck && m_started && frame >= 60 && !m_zoomRequested)
++            {
++                m_zoomRequested = true;
++                const Real originalHeight = TheTacticalView->getHeightAboveGround();
++                TheTacticalView->setUserControlled(FALSE);
++                TheTacticalView->setHeightAboveGround(10000.0f);
++                const Real scriptedLimit = TheTacticalView->getHeightAboveGround();
++                TheTacticalView->setHeightAboveGround(originalHeight);
++                const Bool accepted = TheTacticalView->userZoom(10000.0f);
++                printf("CNC240_ZOOM accepted=%d scripted_limit=%.2f user_limit=%.2f\n", accepted, scriptedLimit, TheTacticalView->getHeightAboveGround());
++                fflush(stdout);
++            }
++            if (m_zoomRequested && !m_zoomReported && frame >= 180)
++            {
++                m_zoomReported = true;
++                printf("CNC240_ZOOM_SETTLED actual_height=%.2f\n", TheTacticalView->getCurrentHeightAboveGround());
++                checkTerrainCoverage();
++                verifyMinimapDrag();
++                verifyCameraSpeed();
++                m_originalAngle = TheTacticalView->getAngle();
++                m_originalPosition = TheTacticalView->getPosition2D();
++                fflush(stdout);
++            }
++            if (m_zoomReported && m_coverageStage == 0 && frame >= 210)
++            {
++                TheTacticalView->userSetAngle(m_originalAngle + 1.5707963f);
++                m_coverageStage = 1;
++            }
++            if (m_zoomReported && m_coverageStage == 1 && frame >= 240)
++            {
++                printf("CNC240_TERRAIN_CASE rotated\n");
++                checkTerrainCoverage();
++                Coord3D edge{0.0f, 0.0f, 0.0f};
++                TheTacticalView->userLookAt(&edge);
++                m_coverageStage = 2;
++            }
++            if (m_zoomReported && m_coverageStage == 2 && frame >= 270)
++            {
++                printf("CNC240_TERRAIN_CASE map_edge\n");
++                checkTerrainCoverage();
++                TheTacticalView->userSetAngle(m_originalAngle);
++                TheTacticalView->setPosition2D(m_originalPosition);
++                m_coverageStage = 3;
++            }
++            if (m_started && !m_crcReported && frame == 300)
++            {
++                printf("CNC240_STATE frame=%u crc=%08X\n", frame, TheGameLogic->getCRC(CRC_RECALC, AsciiString::TheEmptyString));
++                fflush(stdout);
++                m_crcReported = true;
++            }
++            if (frame >= m_lastLogic) m_logic += frame - m_lastLogic;
++            m_lastLogic = frame;
++            const DWORD now = GetTickCount();
++            const bool finished = now - m_start >= static_cast<DWORD>(m_seconds * 1000);
++            if (now - m_lastReport >= 1000 || finished)
++            {
++                printf("CNC240_TIMING elapsed_ms=%lu render_frames=%u logic_frames=%u logic_fps=%d render_cap=%d presented_frames=%lu\n",
++                       now - m_start, m_renders, m_logic, TheFramePacer->getLogicTimeScaleFps(),
++                       TheFramePacer->getActualFramesPerSecondLimit(), getPresentedFrameCount() - m_presentStart);
++                fflush(stdout);
++                m_lastReport = now;
++            }
++            return finished;
++        }
++    private:
++        DWORD m_start, m_lastReport;
++        unsigned int m_renders, m_logic, m_lastLogic;
++        unsigned long m_presentStart;
++        int m_seconds;
++        char m_scenario[64];
++        bool m_started, m_crcReported;
++        bool m_zoomCheck, m_zoomRequested, m_zoomReported;
++        int m_coverageStage;
++        Real m_originalAngle;
++        Coord2D m_originalPosition;
++    };
++}
+diff --git a/Core/GameEngine/Include/Common/Cnc240RenderStats.h b/Core/GameEngine/Include/Common/Cnc240RenderStats.h
+new file mode 100644
+--- /dev/null
++++ b/Core/GameEngine/Include/Common/Cnc240RenderStats.h
+@@ -0,0 +1,11 @@
++// C&C 240 local engine changes, 2026.
++// GPL-3.0-or-later with the additional EA terms in LICENSE.md.
++#pragma once
++namespace cnc240
++{
++    // Count only successful Direct3D Present calls, as tracked by the renderer.
++    unsigned long getPresentedFrameCount();
++    bool checkTerrainCoverage();
++    bool verifyMinimapDrag();
++    bool verifyCameraSpeed();
++}

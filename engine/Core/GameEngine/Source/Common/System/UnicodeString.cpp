@@ -1,0 +1,493 @@
+/*
+**	Command & Conquer Generals Zero Hour(tm)
+**	Copyright 2025 Electronic Arts Inc.
+**
+**	This program is free software: you can redistribute it and/or modify
+**	it under the terms of the GNU General Public License as published by
+**	the Free Software Foundation, either version 3 of the License, or
+**	(at your option) any later version.
+**
+**	This program is distributed in the hope that it will be useful,
+**	but WITHOUT ANY WARRANTY; without even the implied warranty of
+**	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+**	GNU General Public License for more details.
+**
+**	You should have received a copy of the GNU General Public License
+**	along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+////////////////////////////////////////////////////////////////////////////////
+//																																						//
+//  (c) 2001-2003 Electronic Arts Inc.																				//
+//																																						//
+////////////////////////////////////////////////////////////////////////////////
+
+// FILE: UnicodeString.cpp
+//-----------------------------------------------------------------------------
+//
+//                       Westwood Studios Pacific.
+//
+//                       Confidential Information
+//                Copyright (C) 2001 - All Rights Reserved
+//
+//-----------------------------------------------------------------------------
+//
+// Project:    RTS3
+//
+// File name:  UnicodeString.cpp
+//
+// Created:    Steven Johnson, October 2001
+//
+// Desc:       General-purpose string classes
+//
+//-----------------------------------------------------------------------------
+///////////////////////////////////////////////////////////////////////////////
+#include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
+
+#include "Common/CriticalSection.h"
+#include "WWLib/utf8.h"
+
+
+// -----------------------------------------------------
+
+/*static*/ const UnicodeString UnicodeString::TheEmptyString;
+
+// -----------------------------------------------------
+#ifdef RTS_DEBUG
+void UnicodeString::validate() const
+{
+	if (!m_data) return;
+	DEBUG_ASSERTCRASH(m_data->m_refCount > 0, ("m_refCount is zero"));
+	DEBUG_ASSERTCRASH(m_data->m_numCharsAllocated > 0, ("m_numCharsAllocated is zero"));
+	DEBUG_ASSERTCRASH(wcslen(m_data->peek())+1 <= m_data->m_numCharsAllocated,("str is too long for storage"));
+}
+#endif
+
+// -----------------------------------------------------
+UnicodeString::UnicodeString(const UnicodeString& stringSrc) : m_data(stringSrc.m_data)
+{
+	ScopedCriticalSection scopedCriticalSection(TheUnicodeStringCriticalSection);
+	if (m_data)
+		++m_data->m_refCount;
+	validate();
+}
+
+// -----------------------------------------------------
+void UnicodeString::ensureUniqueBufferOfSize(int numCharsNeeded, Bool preserveData, const WideChar* strToCopy, const WideChar* strToCat)
+{
+	validate();
+
+	const int usableNumChars = numCharsNeeded - 1;
+
+	if (m_data &&
+			m_data->m_refCount == 1 &&
+			m_data->m_numCharsAllocated >= numCharsNeeded)
+	{
+		// no buffer manhandling is needed (it's already large enough, and unique to us)
+		if (strToCopy)
+		{
+			// TheSuperHackers @fix Mauller 04/04/2025 Replace wcscpy with safer memmove as memory regions can overlap when part of string is copied to itself
+			DEBUG_ASSERTCRASH(usableNumChars <= wcslen(strToCopy), ("strToCopy is too small"));
+			memmove(m_data->peek(), strToCopy, usableNumChars * sizeof(WideChar));
+			m_data->peek()[usableNumChars] = 0;
+		}
+		if (strToCat)
+			wcscat(m_data->peek(), strToCat);
+		return;
+	}
+
+	DEBUG_ASSERTCRASH(TheDynamicMemoryAllocator != nullptr, ("Cannot use dynamic memory allocator before its initialization. Check static initialization order."));
+	DEBUG_ASSERTCRASH(numCharsNeeded <= MAX_LEN, ("UnicodeString::ensureUniqueBufferOfSize exceeds max string length %d with requested length %d", MAX_LEN, numCharsNeeded));
+	int minBytes = sizeof(UnicodeStringData) + numCharsNeeded*sizeof(WideChar);
+	int actualBytes = TheDynamicMemoryAllocator->getActualAllocationSize(minBytes);
+	UnicodeStringData* newData = (UnicodeStringData*)TheDynamicMemoryAllocator->allocateBytesDoNotZero(actualBytes, "STR_UnicodeString::ensureUniqueBufferOfSize");
+	newData->m_refCount = 1;
+	newData->m_numCharsAllocated = (actualBytes - sizeof(UnicodeStringData))/sizeof(WideChar);
+
+	if (m_data && preserveData)
+		wcscpy(newData->peek(), m_data->peek());
+	else
+		newData->peek()[0] = 0;
+
+	// do these BEFORE releasing the old buffer, so that self-copies
+	// or self-cats will work correctly.
+	if (strToCopy)
+	{
+		DEBUG_ASSERTCRASH(usableNumChars <= wcslen(strToCopy), ("strToCopy is too small"));
+		wcsncpy(newData->peek(), strToCopy, usableNumChars);
+		newData->peek()[usableNumChars] = 0;
+	}
+	if (strToCat)
+		wcscat(newData->peek(), strToCat);
+
+	releaseBuffer();
+	m_data = newData;
+
+	validate();
+}
+
+
+// -----------------------------------------------------
+void UnicodeString::releaseBuffer()
+{
+	ScopedCriticalSection scopedCriticalSection(TheUnicodeStringCriticalSection);
+
+	validate();
+	if (m_data)
+	{
+		if (--m_data->m_refCount == 0)
+		{
+			TheDynamicMemoryAllocator->freeBytes(m_data);
+		}
+		m_data = nullptr;
+	}
+}
+
+// -----------------------------------------------------
+UnicodeString::UnicodeString(const WideChar* s) : m_data(nullptr)
+{
+	int len = s ? (int)wcslen(s) : 0;
+	if (len > 0)
+	{
+		ensureUniqueBufferOfSize(len + 1, false, s, nullptr);
+	}
+	validate();
+}
+
+// -----------------------------------------------------
+UnicodeString::UnicodeString(const WideChar* s, int len) : m_data(nullptr)
+{
+	if (len > 0)
+	{
+		ensureUniqueBufferOfSize(len + 1, false, s, nullptr);
+	}
+	validate();
+}
+
+// -----------------------------------------------------
+void UnicodeString::set(const UnicodeString& stringSrc)
+{
+	ScopedCriticalSection scopedCriticalSection(TheUnicodeStringCriticalSection);
+
+	validate();
+	if (&stringSrc != this)
+	{
+		releaseBuffer();
+		m_data = stringSrc.m_data;
+		if (m_data)
+			++m_data->m_refCount;
+	}
+	validate();
+}
+
+// -----------------------------------------------------
+void UnicodeString::set(const WideChar* s)
+{
+	int len = s ? wcslen(s) : 0;
+	set(s, len);
+}
+
+// -----------------------------------------------------
+void UnicodeString::set(const WideChar* s, int len)
+{
+	validate();
+	if (!m_data || s != peek())
+	{
+		if (len > 0)
+		{
+			ensureUniqueBufferOfSize(len + 1, false, s, nullptr);
+		}
+		else
+		{
+			releaseBuffer();
+		}
+	}
+	validate();
+}
+
+// -----------------------------------------------------
+WideChar* UnicodeString::getBufferForRead(Int len)
+{
+	validate();
+	DEBUG_ASSERTCRASH(len>0, ("No need to allocate 0 len strings."));
+	ensureUniqueBufferOfSize(len + 1, false, nullptr, nullptr);
+	validate();
+	return peek();
+}
+
+// -----------------------------------------------------
+void UnicodeString::translate(const AsciiString& stringSrc)
+{
+	validate();
+	// TheSuperHackers @fix bobtista 02/04/2026 Convert UTF-8 to wide, replacing the 7-bit ASCII only
+	// implementation. Data that is not valid UTF-8 (e.g. legacy CP1252) falls back to a 1:1 byte cast
+	// to preserve the original characters instead of producing replacement characters.
+	const char* src = stringSrc.str();
+	const size_t srcLen = strlen(src);
+	const size_t dstLen = Utf8_To_Wide_Len(src, srcLen);
+	if (dstLen != UTF8_INVALID)
+	{
+		if (dstLen == 0)
+		{
+			clear();
+		}
+		else
+		{
+			ensureUniqueBufferOfSize((Int)dstLen + 1, false, nullptr, nullptr);
+			Utf8_To_Wide(peek(), dstLen + 1, src, srcLen);
+		}
+	}
+	else
+	{
+		ensureUniqueBufferOfSize((Int)srcLen + 1, false, nullptr, nullptr);
+		WideChar* buf = peek();
+		for (size_t i = 0; i < srcLen; ++i)
+		{
+			buf[i] = (WideChar)(unsigned char)src[i];
+		}
+		buf[srcLen] = 0;
+	}
+	validate();
+}
+
+// -----------------------------------------------------
+void UnicodeString::concat(const WideChar* s)
+{
+	validate();
+	int addlen = wcslen(s);
+	if (addlen == 0)
+		return;	// my, that was easy
+
+	if (m_data)
+	{
+		ensureUniqueBufferOfSize(getLength() + addlen + 1, true, nullptr, s);
+	}
+	else
+	{
+		set(s);
+	}
+	validate();
+}
+
+// -----------------------------------------------------
+void UnicodeString::trim()
+{
+	validate();
+
+	if (m_data)
+	{
+		const WideChar *c = peek();
+
+		//	Strip leading white space from the string.
+		while (c && iswspace(*c))
+		{
+			c++;
+		}
+		if (c != peek())
+		{
+			set(c);
+		}
+
+		trimEnd();
+	}
+	validate();
+}
+
+// -----------------------------------------------------
+void UnicodeString::trimEnd()
+{
+	validate();
+
+	if (m_data)
+	{
+		//	Clip trailing white space from the string.
+		const int len = wcslen(peek());
+		int index = len;
+		while (index > 0 && iswspace(getCharAt(index - 1)))
+		{
+			--index;
+		}
+
+		if (index < len)
+		{
+			truncateTo(index);
+		}
+	}
+	validate();
+}
+
+// -----------------------------------------------------
+void UnicodeString::trimEnd(const WideChar c)
+{
+	validate();
+
+	if (m_data)
+	{
+		// Clip trailing consecutive occurrences of c from the string.
+		const int len = wcslen(peek());
+		int index = len;
+		while (index > 0 && getCharAt(index - 1) == c)
+		{
+			--index;
+		}
+
+		if (index < len)
+		{
+			truncateTo(index);
+		}
+	}
+	validate();
+}
+
+// -----------------------------------------------------
+void UnicodeString::removeLastChar()
+{
+	truncateBy(1);
+}
+
+// -----------------------------------------------------
+void UnicodeString::truncateBy(const Int charCount)
+{
+	validate();
+	if (m_data && charCount > 0)
+	{
+		const size_t len = wcslen(peek());
+		if (len > 0)
+		{
+			ensureUniqueBufferOfSize(len + 1, true, nullptr, nullptr);
+			size_t count = charCount;
+			if (charCount > len)
+			{
+				count = len;
+			}
+			peek()[len - count] = 0;
+		}
+	}
+	validate();
+}
+
+// -----------------------------------------------------
+void UnicodeString::truncateTo(const Int maxLength)
+{
+	validate();
+	if (m_data)
+	{
+		const size_t len = wcslen(peek());
+		if (len > maxLength)
+		{
+			ensureUniqueBufferOfSize(len + 1, true, nullptr, nullptr);
+			peek()[maxLength] = 0;
+		}
+	}
+	validate();
+}
+
+// -----------------------------------------------------
+void UnicodeString::format(UnicodeString format, ...)
+{
+	validate();
+	va_list args;
+  va_start(args, format);
+	format_va(format, args);
+  va_end(args);
+	validate();
+}
+
+// -----------------------------------------------------
+void UnicodeString::format(const WideChar* format, ...)
+{
+	validate();
+	va_list args;
+  va_start(args, format);
+	format_va(format, args);
+  va_end(args);
+	validate();
+}
+
+// -----------------------------------------------------
+void UnicodeString::format_va(const UnicodeString& format, va_list args)
+{
+	format_va(format.str(), args);
+}
+
+// -----------------------------------------------------
+void UnicodeString::format_va(const WideChar* format, va_list args)
+{
+	validate();
+	WideChar buf[MAX_FORMAT_BUF_LEN];
+	const int result = vswprintf(buf, sizeof(buf)/sizeof(WideChar), format, args);
+	if (result >= 0)
+	{
+		set(buf);
+		validate();
+	}
+	else
+	{
+		DEBUG_CRASH(("UnicodeString::format_va failed with code:%d", result));
+	}
+}
+
+// -----------------------------------------------------
+Bool UnicodeString::startsWith(const WideChar* p) const
+{
+	return m_data && ::startsWith(peek(), p);
+}
+
+// -----------------------------------------------------
+Bool UnicodeString::startsWithNoCase(const WideChar* p) const
+{
+	return m_data && ::startsWithNoCase(peek(), p);
+}
+
+// -----------------------------------------------------
+Bool UnicodeString::endsWith(const WideChar* p) const
+{
+	return m_data && ::endsWith(peek(), p);
+}
+
+// -----------------------------------------------------
+Bool UnicodeString::endsWithNoCase(const WideChar* p) const
+{
+	return m_data && ::endsWithNoCase(peek(), p);
+}
+
+//-----------------------------------------------------------------------------
+Bool UnicodeString::nextToken(UnicodeString* tok, const WideChar* separators)
+{
+	DEBUG_ASSERTCRASH(tok != this, ("Tokenizer and Token cannot be the same object"));
+
+	if (this->isEmpty())
+	{
+		tok->clear();
+		return false;
+	}
+
+	if (separators == nullptr)
+		separators = L" \t\n\r";
+
+	Int offset;
+
+	offset = wcsspn(peek(), separators);
+	WideChar* start = peek() + offset;
+
+	offset = wcscspn(start, separators);
+	WideChar* end = start + offset;
+
+	if (end > start)
+	{
+		Int len = end - start;
+		WideChar* tmp = tok->getBufferForRead(len + 1);
+		memcpy(tmp, start, len*2);
+		tmp[len] = 0;
+
+		this->set(end);
+
+		return true;
+	}
+	else
+	{
+		this->clear();
+		tok->clear();
+		return false;
+	}
+}

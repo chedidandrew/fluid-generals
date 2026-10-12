@@ -1,0 +1,230 @@
+/*
+**	Command & Conquer Generals Zero Hour(tm)
+**	Copyright 2025 Electronic Arts Inc.
+**
+**	This program is free software: you can redistribute it and/or modify
+**	it under the terms of the GNU General Public License as published by
+**	the Free Software Foundation, either version 3 of the License, or
+**	(at your option) any later version.
+**
+**	This program is distributed in the hope that it will be useful,
+**	but WITHOUT ANY WARRANTY; without even the implied warranty of
+**	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+**	GNU General Public License for more details.
+**
+**	You should have received a copy of the GNU General Public License
+**	along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+////////////////////////////////////////////////////////////////////////////////
+//																																						//
+//  (c) 2001-2003 Electronic Arts Inc.																				//
+//																																						//
+////////////////////////////////////////////////////////////////////////////////
+
+
+#include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
+
+#include "GameNetwork/networkutil.h"
+
+#ifdef DEBUG_LOGGING
+
+void dumpBufferToLog(const void *vBuf, Int len, const char *fname, Int line)
+{
+	DEBUG_LOG(("======= dumpBufferToLog() %d bytes =======", len));
+	DEBUG_LOG(("Source: %s:%d", fname, line));
+	const char *buf = (const char *)vBuf;
+	Int numLines = len / 8;
+	if ((len % 8) != 0)
+	{
+		++numLines;
+	}
+	for (Int dumpindex = 0; dumpindex < numLines; ++dumpindex)
+	{
+		Int offset = dumpindex*8;
+		DEBUG_LOG_RAW(("\t%5.5d\t", offset));
+		Int dumpindex2;
+		Int numBytesThisLine = min(8, len - offset);
+		for (dumpindex2 = 0; dumpindex2 < numBytesThisLine; ++dumpindex2)
+		{
+			Int c = (buf[offset + dumpindex2] & 0xff);
+			DEBUG_LOG_RAW(("%02X ", c));
+		}
+		for (; dumpindex2 < 8; ++dumpindex2)
+		{
+			DEBUG_LOG_RAW(("   "));
+		}
+		DEBUG_LOG_RAW((" | "));
+		for (dumpindex2 = 0; dumpindex2 < numBytesThisLine; ++dumpindex2)
+		{
+			char c = buf[offset + dumpindex2];
+			DEBUG_LOG_RAW(("%c", (isprint(c)?c:'.')));
+		}
+		DEBUG_LOG_RAW(("\n"));
+	}
+	DEBUG_LOG(("End of packet dump"));
+}
+
+#endif // DEBUG_LOGGING
+
+/**
+ * ResolveIP turns a string ("games2.westwood.com", or "192.168.0.1") into
+ * a 32-bit unsigned integer.
+ */
+UnsignedInt ResolveIP(AsciiString host)
+{
+  struct hostent *hostStruct;
+  struct in_addr *hostNode;
+
+  if (host.isEmpty())
+  {
+	  DEBUG_LOG(("ResolveIP(): Can't resolve null"));
+	  return 0;
+  }
+
+  // String such as "127.0.0.1"
+  if (isdigit(host.getCharAt(0)))
+  {
+    return ( ntohl(inet_addr(host.str())) );
+  }
+
+  // String such as "localhost"
+  hostStruct = gethostbyname(host.str());
+  if (hostStruct == nullptr)
+  {
+	  DEBUG_LOG(("ResolveIP(): Can't resolve %s", host.str()));
+	  return 0;
+  }
+  hostNode = (struct in_addr *) hostStruct->h_addr;
+  return ( ntohl(hostNode->s_addr) );
+}
+
+/**
+ * Returns the next network command ID.
+ */
+static UnsignedShort s_commandID = 0;
+UnsignedShort GenerateNextCommandID()
+{
+	return s_commandID++;
+}
+
+/**
+ * Returns true if this type of command requires a unique command ID.
+ */
+Bool DoesCommandRequireACommandID(NetCommandType type)
+{
+	switch (type) {
+	case NETCOMMANDTYPE_FRAMEINFO:
+	case NETCOMMANDTYPE_GAMECOMMAND:
+	case NETCOMMANDTYPE_PLAYERLEAVE:
+	case NETCOMMANDTYPE_RUNAHEADMETRICS:
+	case NETCOMMANDTYPE_RUNAHEAD:
+	case NETCOMMANDTYPE_DESTROYPLAYER:
+	case NETCOMMANDTYPE_CHAT:
+	case NETCOMMANDTYPE_LOADCOMPLETE:
+	case NETCOMMANDTYPE_TIMEOUTSTART:
+	case NETCOMMANDTYPE_WRAPPER:
+	case NETCOMMANDTYPE_FILE:
+	case NETCOMMANDTYPE_FILEANNOUNCE:
+	case NETCOMMANDTYPE_FILEPROGRESS:
+	case NETCOMMANDTYPE_FRAMERESENDREQUEST:
+	case NETCOMMANDTYPE_DISCONNECTPLAYER:
+	case NETCOMMANDTYPE_DISCONNECTVOTE:
+	case NETCOMMANDTYPE_DISCONNECTFRAME:
+	case NETCOMMANDTYPE_DISCONNECTSCREENOFF:
+		return TRUE;
+	default:
+		return FALSE;
+	}
+}
+
+/**
+ * Returns true if this type of network command requires an ack.
+ */
+Bool CommandRequiresAck(const NetCommandMsg* msg)
+{
+	return DoesCommandRequireACommandID(msg->getNetCommandType());
+}
+
+Bool IsCommandSynchronized(NetCommandType type)
+{
+	switch (type) {
+	case NETCOMMANDTYPE_FRAMEINFO:
+	case NETCOMMANDTYPE_GAMECOMMAND:
+	case NETCOMMANDTYPE_PLAYERLEAVE:
+	case NETCOMMANDTYPE_RUNAHEAD:
+	case NETCOMMANDTYPE_DESTROYPLAYER:
+		return TRUE;
+	default:
+		return FALSE;
+	}
+}
+
+/**
+ * Returns true if this type of network command requires the ack to be sent directly to the player
+ * rather than going through the packet router.  This should really only be used by commands
+ * used on the disconnect screen.
+ */
+Bool CommandRequiresDirectSend(const NetCommandMsg* msg)
+{
+	switch (msg->getNetCommandType()) {
+	case NETCOMMANDTYPE_LOADCOMPLETE:
+	case NETCOMMANDTYPE_TIMEOUTSTART:
+	case NETCOMMANDTYPE_FILE:
+	case NETCOMMANDTYPE_FILEANNOUNCE:
+	case NETCOMMANDTYPE_FILEPROGRESS:
+	case NETCOMMANDTYPE_FRAMERESENDREQUEST:
+	case NETCOMMANDTYPE_DISCONNECTPLAYER:
+	case NETCOMMANDTYPE_DISCONNECTVOTE:
+	case NETCOMMANDTYPE_DISCONNECTFRAME:
+	case NETCOMMANDTYPE_DISCONNECTSCREENOFF:
+		return TRUE;
+	default:
+		return FALSE;
+	}
+}
+
+const char* GetNetCommandTypeAsString(NetCommandType type)
+{
+#define CASE_LABEL(x) case x: return #x;
+
+	switch (type) {
+	CASE_LABEL(NETCOMMANDTYPE_UNKNOWN)
+	CASE_LABEL(NETCOMMANDTYPE_ACKBOTH)
+	CASE_LABEL(NETCOMMANDTYPE_ACKSTAGE1)
+	CASE_LABEL(NETCOMMANDTYPE_ACKSTAGE2)
+	CASE_LABEL(NETCOMMANDTYPE_FRAMEINFO)
+	CASE_LABEL(NETCOMMANDTYPE_GAMECOMMAND)
+	CASE_LABEL(NETCOMMANDTYPE_PLAYERLEAVE)
+	CASE_LABEL(NETCOMMANDTYPE_RUNAHEADMETRICS)
+	CASE_LABEL(NETCOMMANDTYPE_RUNAHEAD)
+	CASE_LABEL(NETCOMMANDTYPE_DESTROYPLAYER)
+	CASE_LABEL(NETCOMMANDTYPE_KEEPALIVE)
+	CASE_LABEL(NETCOMMANDTYPE_DISCONNECTCHAT)
+	CASE_LABEL(NETCOMMANDTYPE_CHAT)
+	CASE_LABEL(NETCOMMANDTYPE_MANGLERQUERY)
+	CASE_LABEL(NETCOMMANDTYPE_MANGLERRESPONSE)
+	CASE_LABEL(NETCOMMANDTYPE_PROGRESS)
+	CASE_LABEL(NETCOMMANDTYPE_LOADCOMPLETE)
+	CASE_LABEL(NETCOMMANDTYPE_TIMEOUTSTART)
+	CASE_LABEL(NETCOMMANDTYPE_WRAPPER)
+	CASE_LABEL(NETCOMMANDTYPE_FILE)
+	CASE_LABEL(NETCOMMANDTYPE_FILEANNOUNCE)
+	CASE_LABEL(NETCOMMANDTYPE_FILEPROGRESS)
+	CASE_LABEL(NETCOMMANDTYPE_FRAMERESENDREQUEST)
+	CASE_LABEL(NETCOMMANDTYPE_DISCONNECTSTART)
+	CASE_LABEL(NETCOMMANDTYPE_DISCONNECTKEEPALIVE)
+	CASE_LABEL(NETCOMMANDTYPE_DISCONNECTPLAYER)
+	CASE_LABEL(NETCOMMANDTYPE_PACKETROUTERQUERY)
+	CASE_LABEL(NETCOMMANDTYPE_PACKETROUTERACK)
+	CASE_LABEL(NETCOMMANDTYPE_DISCONNECTVOTE)
+	CASE_LABEL(NETCOMMANDTYPE_DISCONNECTFRAME)
+	CASE_LABEL(NETCOMMANDTYPE_DISCONNECTSCREENOFF)
+	CASE_LABEL(NETCOMMANDTYPE_DISCONNECTEND)
+	default:
+		DEBUG_CRASH(("Unhandled NetCommandType in GetNetCommandTypeAsString"));
+		return "<NETCOMMANDTYPE_INVALID>";
+	}
+
+#undef CASE_LABEL
+}

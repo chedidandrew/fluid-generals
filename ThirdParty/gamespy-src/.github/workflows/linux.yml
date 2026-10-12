@@ -1,0 +1,36 @@
+name: linux
+
+on:
+  pull_request:
+  push:
+  release:
+    types: published
+
+jobs:
+  linux:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        cc: [clang, gcc]
+        os: [ubuntu-20.04, ubuntu-24.04]
+        include:
+          - cc: clang
+            cxx: clang++
+          - cc: gcc
+            cxx: g++
+
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        
+    - name: Install dependencies
+      run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build libspeex-dev
+
+    - name: Build GamespySDK
+      env:
+        CC: ${{ matrix.cc }}
+        CXX: ${{ matrix.cxx }}
+      run: |
+        cmake --workflow --preset unix

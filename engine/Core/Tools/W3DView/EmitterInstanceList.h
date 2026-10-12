@@ -1,0 +1,107 @@
+/*
+**	Command & Conquer Renegade(tm)
+**	Copyright 2025 Electronic Arts Inc.
+**
+**	This program is free software: you can redistribute it and/or modify
+**	it under the terms of the GNU General Public License as published by
+**	the Free Software Foundation, either version 3 of the License, or
+**	(at your option) any later version.
+**
+**	This program is distributed in the hope that it will be useful,
+**	but WITHOUT ANY WARRANTY; without even the implied warranty of
+**	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+**	GNU General Public License for more details.
+**
+**	You should have received a copy of the GNU General Public License
+**	along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+/***********************************************************************************************
+ ***              C O N F I D E N T I A L  ---  W E S T W O O D  S T U D I O S               ***
+ ***********************************************************************************************
+ *                                                                                             *
+ *                 Project Name : W3DView                                                      *
+ *                                                                                             *
+ *                     $Archive:: /VSS_Sync/W3DView/EmitterInstanceList.h                                                                                                                                                                                                                                                                                                                                 $Modtime::                                                             $*
+ *                                                                                             *
+ *                    $Revision:: 6                                                           $*
+ *                                                                                             *
+ *---------------------------------------------------------------------------------------------*
+ * Functions:                                                                                  *
+ * - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
+
+#pragma once
+
+#include "WWLib/Vector.h"
+#include "WW3D2/part_ldr.h"
+#include "WW3D2/part_emt.h"
+
+
+/////////////////////////////////////////////////////////////////////
+//
+//	EmitterInstanceListClass
+//
+/////////////////////////////////////////////////////////////////////
+class EmitterInstanceListClass : public ParticleEmitterDefClass
+{
+	public:
+
+		///////////////////////////////////////////////////////
+		// Public constructors/destructors
+		///////////////////////////////////////////////////////
+		EmitterInstanceListClass ()		{ }
+		EmitterInstanceListClass (const EmitterInstanceListClass &src)
+			: ParticleEmitterDefClass (src)	{ }
+
+		virtual ~EmitterInstanceListClass () override;
+
+		///////////////////////////////////////////////////////
+		// Public methods
+		///////////////////////////////////////////////////////
+		virtual void			Add_Emitter (ParticleEmitterClass *emitter);
+		virtual void			Free_List ();
+
+		///////////////////////////////////////////////////////
+		// Derived overrides
+		///////////////////////////////////////////////////////
+
+		//
+		//	Note:  The following are settings that can be changed on
+		//		the fly.  All other settings are simply cached in the
+		//		definition and can be used to create a new prototype loader.
+		//
+
+		virtual void			Set_Velocity (const Vector3 &value) override;
+		virtual void			Set_Acceleration (const Vector3 &value) override;
+		virtual void			Set_Burst_Size (unsigned int count) override;
+		virtual void			Set_Outward_Vel (float value) override;
+		virtual void			Set_Vel_Inherit (float value) override;
+
+		//
+		//	Randomizer accessors
+		//
+		virtual void			Set_Velocity_Random (Vector3Randomizer *randomizer) override;
+
+		//
+		//	Keyframe accessors
+		//
+		virtual void			Set_Color_Keyframes (ParticlePropertyStruct<Vector3> &keyframes) override;
+		virtual void			Set_Opacity_Keyframes (ParticlePropertyStruct<float> &keyframes) override;
+		virtual void			Set_Size_Keyframes (ParticlePropertyStruct<float> &keyframes) override;
+		virtual void			Set_Rotation_Keyframes (ParticlePropertyStruct<float> &keyframes, float orient_rnd) override;
+		virtual void			Set_Frame_Keyframes (ParticlePropertyStruct<float> &keyframes) override;
+		virtual void			Set_Blur_Time_Keyframes (ParticlePropertyStruct<float> &keyframes) override;
+
+		virtual void			Get_Color_Keyframes (ParticlePropertyStruct<Vector3> &keyframes) const override;
+		virtual void			Get_Opacity_Keyframes (ParticlePropertyStruct<float> &keyframes) const override;
+		virtual void			Get_Size_Keyframes (ParticlePropertyStruct<float> &keyframes) const override;
+
+
+	private:
+
+		///////////////////////////////////////////////////////
+		// Private member data
+		///////////////////////////////////////////////////////
+
+		DynamicVectorClass<ParticleEmitterClass *>	m_List;
+};

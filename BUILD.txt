@@ -1,0 +1,14 @@
+Build from this repository (engine/), or extract the release source ZIP.
+Requires VS 2022 C++ workload, Windows SDK, CMake 3.28+ and Git.
+
+cmake -S engine -B build -G "Visual Studio 17 2022" -A Win32 -DRTS_BUILD_CORE_TOOLS=OFF -DRTS_BUILD_CORE_EXTRAS=OFF -DRTS_BUILD_ZEROHOUR_TOOLS=OFF -DRTS_BUILD_GENERALS_TOOLS=OFF -DRTS_BUILD_OUTPUT_SUFFIX=sim -DRTS_DEBUG_LOGGING=OFF -DRTS_DEBUG_CRASHING=OFF -DRTS_DEBUG_STACKTRACE=OFF -DRTS_DEBUG_PROFILE=OFF -DRTS_MEMORYPOOL_DEBUG=OFF -DRTS_MEMORYPOOL_DEBUG_BOUNDINGWALL=OFF -DFLUID_ENABLE_DEVELOPMENT_PROBES=OFF
+cmake --build build --config Release --target g_generals z_generals --parallel 2
+
+Outputs: build/Generals/Release/generalsvsim.exe;
+build/GeneralsMD/Release/generalszhsim.exe. Dependencies are pinned by CMake;
+their sources/licenses are included in ThirdParty. Test automation defaults OFF.
+
+Player ZIPs: download the Microsoft-signed x86 runtime from
+https://aka.ms/vc14/vc_redist.x86.exe, then run:
+python tools/package_release.py --build build --runtime vc_redist.x86.exe
+Extracted release source uses GeneralsGameCode/; rename it engine/ for these commands.

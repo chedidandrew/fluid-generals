@@ -1,0 +1,4 @@
+Engine: Electronic Arts; upstream improvements: TheSuperHackers.
+Fluid changes/install helpers: project contributors, with AI assistance.
+Modified engine: GPL-3.0-or-later plus EA additional terms; helpers: 0BSD.
+Third-party licenses retained. No EA affiliation or endorsement.

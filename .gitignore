@@ -1,0 +1,9 @@
+/build/
+/dist/
+*.user
+*.suo
+/engine/Core/Tools/wolSetup/WOLAPI/wolapi.dll
+/engine/Core/Tools/wolSetup/WOLAPI/woldbg.dll
+/engine/Generals/Run/BrowserEngine.dll
+/engine/GeneralsMD/Run/BrowserEngine.dll
+/ThirdParty/stb-src/tests/oversample/oversample.exe

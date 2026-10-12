@@ -1,0 +1,30 @@
+name: macos
+
+on:
+  pull_request:
+  push:
+  release:
+    types: published
+
+jobs:
+  macos:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-13, macos-15]
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+
+    - uses: seanmiddleditch/gha-setup-ninja@v6
+      with:
+        version: 1.12.1
+
+    - name: Build GamespySDK
+      env:
+        CC: clang
+        CXX: clang++
+      run: |
+        cmake --workflow --preset unix
