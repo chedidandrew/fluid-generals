@@ -1,0 +1,10 @@
+{
+  "tool": "built-in imagegen",
+  "use": "ModDB logo draft",
+  "prompt": "Use case: logo-brand. Create one finished ModDB browsing logo for Command & Conquer: Fluid Generals Zero Hour. Canvas 1536x1152, 4:3, opaque. Exact text: small \"COMMAND & CONQUER\", dominant \"FLUID GENERALS\", secondary \"ZERO HOUR\". Deliberate professional graphic design: custom condensed military lettering, precise kerning, strong hierarchy, crisp edges, balanced margins, understated gold and ivory on charcoal, subtle printed wear. A restrained angular motion motif suggests fluid performance. Keep the title readable at thumbnail size. No game screenshots, characters, generic AI sci-fi ornaments, neon glow, lens flares, elaborate crests, mockups, watermarks, slogans, or extra text.",
+  "dimensions": [
+    1448,
+    1086
+  ],
+  "bytes": 2255496
+}
